@@ -220,6 +220,10 @@
     .polygonsTransitionDuration(900)
     .pointOfView({ lat: 22, lng: 10, altitude: 5.5 });
 
+  if (location.search.includes('debug')) window.ATLAS_DEBUG = { globe, styleGlobe: () => styleGlobe(), paint: () => paintSurface() };
+
+  globe.renderer().setPixelRatio(Math.min(devicePixelRatio || 1, 1.5));
+
   const mat = globe.globeMaterial();
   mat.color.set('#04141f');
   mat.emissive.set('#032635');
@@ -234,10 +238,10 @@
   addEventListener('resize', () => globe.width(innerWidth).height(innerHeight));
 
   let features = [];
-  let globeClickAt = 0;
 
-  // ---- fallback picking: globe.gl only picks what the pointer last *hovered*, so a
-  // touch tap (or a click without a preceding mousemove) would otherwise do nothing.
+  // ------------------------------------------------------------ hit testing
+  // Country shapes are painted into the globe texture (see below), so hover and click
+  // are resolved here: screen point -> lat/lng -> country, hotspot or capital beacon.
   function inRing(ring, x, y) {
     let inside = false;
     for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
@@ -247,39 +251,67 @@
     return inside;
   }
   function featureContains(f, lng, lat) {
+    const b = f.bbox;
+    if (b && (lng < b[0] || lng > b[2] || lat < b[1] || lat > b[3])) return false;
     const polys = f.geometry.type === 'Polygon' ? [f.geometry.coordinates] : f.geometry.coordinates;
     return polys.some(p => inRing(p[0], lng, lat) && !p.slice(1).some(h => inRing(h, lng, lat)));
   }
-  function pickAt(clientX, clientY) {
+  function featureAt(lat, lng) {
+    return features.find(f => featureContains(f, lng, lat)) || null;
+  }
+  // -> country | hotspot (has .hot) | { nonUN: name } | null
+  function hitTest(clientX, clientY) {
     const wr = wrap.getBoundingClientRect();
     const x = clientX - wr.left, y = clientY - wr.top;
     const pov = globe.pointOfView();
     const horizon = Math.acos(1 / (1 + pov.altitude)) * 180 / Math.PI;
-    let best = null, bestD = 16; // tiny states: nearest capital beacon within 16px wins
+    const screenDist = (lat, lng) => {
+      if (angularDistance(pov, { lat, lng }) > horizon) return Infinity;
+      const p = globe.getScreenCoords(lat, lng, 0.01);
+      return Math.hypot(p.x - x, p.y - y);
+    };
+    if (hotOn) {
+      let bestH = null, dH = 9;
+      for (const h of state.hotspots) { const d = screenDist(h.lat, h.lng); if (d < dH) { dH = d; bestH = h; } }
+      if (bestH) return bestH;
+    }
+    let best = null, bestD = 14; // tiny states: nearest capital beacon wins
     for (const c of COUNTRIES) {
-      if (c.lat == null || angularDistance(pov, c) > horizon) continue;
-      const p = globe.getScreenCoords(c.lat, c.lng, 0.01);
-      const d = Math.hypot(p.x - x, p.y - y);
+      if (c.lat == null) continue;
+      const d = screenDist(c.lat, c.lng);
       if (d < bestD) { bestD = d; best = c; }
     }
     const g = globe.toGlobeCoords(x, y);
-    if (g) {
-      const f = features.find(f => f.country && featureContains(f, g.lng, g.lat));
-      if (f && (!best || bestD > 6)) return f.country;
-    }
+    const f = g ? featureAt(g.lat, g.lng) : null;
+    if (f && (!best || bestD > 6)) return f.country || { nonUN: f.properties.name || 'Territory' };
     return best;
   }
-  let downAt = null;
-  $('globe').addEventListener('pointerdown', e => { downAt = [e.clientX, e.clientY]; });
-  $('globe').addEventListener('click', e => {
+  function activate(hit) {
+    if (!hit) return;
+    if (hit.hot) {
+      if (hit.country) select(hit.country);
+      else toast(`HOTSPOT · ${hit.name.toUpperCase()} · OUTSIDE UN MEMBER TERRITORY`);
+    } else if (hit.nonUN) {
+      toast(`NO UN RECORD · ${hit.nonUN.toUpperCase()} IS NOT A UN MEMBER STATE`);
+    } else select(hit);
+  }
+
+  const globeEl = $('globe');
+  let downAt = null, hoverRaf = 0, lastMove = null;
+  globeEl.addEventListener('pointerdown', e => { downAt = [e.clientX, e.clientY]; });
+  globeEl.addEventListener('click', e => {
     if (!downAt || Math.hypot(e.clientX - downAt[0], e.clientY - downAt[1]) > 6) return; // was a drag
-    const t = performance.now();
-    setTimeout(() => {
-      if (globeClickAt >= t - 400) return; // globe.gl already handled it
-      const c = pickAt(e.clientX, e.clientY);
-      if (c) select(c);
-    }, 40);
+    activate(hitTest(e.clientX, e.clientY));
   });
+  globeEl.addEventListener('pointermove', e => {
+    if (e.buttons) { if (state.hover || tooltip.style.display === 'block') setHover(null); return; } // rotating
+    lastMove = e;
+    if (!hoverRaf) hoverRaf = requestAnimationFrame(() => {
+      hoverRaf = 0;
+      if (lastMove) setHover(hitTest(lastMove.clientX, lastMove.clientY));
+    });
+  });
+  globeEl.addEventListener('pointerleave', () => { lastMove = null; setHover(null); });
 
   async function loadGeometry() {
     const hi = await fetch('https://cdn.jsdelivr.net/npm/world-atlas@2.0.2/countries-50m.json').then(r => r.json());
@@ -288,67 +320,154 @@
       f.country = byNum.get(f.id) || null;
       if (f.country) f.country.feature = f;
     }
-    globe
-      .polygonsData(features)
-      .polygonCapCurvatureResolution(4)
-      .onPolygonHover(f => setHover(f ? (f.country || { nonUN: f.properties.name }) : null))
-      .onPolygonClick(f => { globeClickAt = performance.now(); f.country ? select(f.country) : toast(`NO UN RECORD · ${(f.properties.name || 'TERRITORY').toUpperCase()} IS NOT A UN MEMBER STATE`); });
+    buildSurfacePaths();
 
-    // capitals as small beacons; tiny island states without a shape get a bigger one
+    // the only 3D country shape: the selected nation rising off the globe
+    globe
+      .polygonCapCurvatureResolution(4)
+      .polygonAltitude(() => selAlt)
+      .polygonCapColor(() => 'rgba(0, 229, 255, 0.78)')
+      .polygonSideColor(() => 'rgba(0, 229, 255, 0.35)')
+      .polygonStrokeColor(() => '#d6fbff');
+
+    // hover outline (a few thin lines instead of re-building country meshes)
+    globe
+      .pathsData([])
+      .pathPoints(d => d)
+      .pathPointLat(p => p[1])
+      .pathPointLng(p => p[0])
+      .pathPointAlt(0.004)
+      .pathColor(() => 'rgba(200, 252, 255, 0.95)')
+      .pathTransitionDuration(0);
+
+    // capitals as small beacons, merged into ONE mesh; tiny island states get a bigger one
     globe
       .pointsData(COUNTRIES.filter(c => c.lat != null))
       .pointLat('lat').pointLng('lng')
-      .pointsMerge(false)
-      .pointsTransitionDuration(600)
-      .onPointHover(c => setHover(c || null))
-      .onPointClick(c => { globeClickAt = performance.now(); select(c); });
+      .pointsMerge(true)
+      .pointsTransitionDuration(0);
 
-    // pulse rings: the selected capital (cyan) + news hotspots (amber to red with conflict share)
+    // pulse rings: the selected capital (cyan) + the biggest news hotspots (amber to red)
     globe
       .ringLat('lat').ringLng('lng')
       .ringColor(d => d.sel ? (t => `rgba(0, 229, 255, ${1 - t})`) : (t => `rgba(${hotColour(d)}, ${(1 - t) * 0.85})`))
       .ringMaxRadius(d => d.sel ? 4.5 : 0.8 + d.t * 3.2)
       .ringPropagationSpeed(d => d.sel ? 2.6 : 0.9 + d.t * 1.6)
       .ringRepeatPeriod(d => d.sel ? 850 : 2300 - d.t * 1400)
-      .ringAltitude(d => d.sel ? selAlt + 0.002 : 0.009);
-
-    // hotspot cores (a label layer with no text: just the glowing dot)
-    globe
-      .labelLat('lat').labelLng('lng')
-      .labelText(() => '')
-      .labelSize(0.01)
-      .labelDotRadius(d => 0.12 + d.t * 0.38)
-      .labelColor(d => `rgba(${hotColour(d)}, 0.95)`)
-      .labelAltitude(0.011)
-      .labelResolution(1)
-      .labelsTransitionDuration(0)
-      .onLabelHover(d => setHover(d || null))
-      .onLabelClick(d => {
-        globeClickAt = performance.now();
-        if (d.country) select(d.country);
-        else toast(`HOTSPOT · ${d.name.toUpperCase()} · OUTSIDE UN MEMBER TERRITORY`);
-      });
+      .ringAltitude(d => d.sel ? selAlt + 0.002 : 0.004);
 
     styleGlobe();
+  }
+
+  // ------------------------------------------------------------ globe surface texture
+  // Country colours, borders and hotspot dots are painted into the globe's own texture:
+  // one draw call, instead of ~3 meshes per country shape (thousands of draw calls).
+  const TEX_W = 4096, TEX_H = 2048;
+  const surface = document.createElement('canvas');
+  surface.width = TEX_W;
+  surface.height = TEX_H;
+  const sg = surface.getContext('2d');
+  const sky = document.createElement('canvas');
+  sky.width = DayNight.W;
+  sky.height = DayNight.H;
+  let skyReady = false, texObj = null, paintQueued = false, bootstrapping = false;
+  let unBorders = null, otherBorders = null;
+  const tx = lng => (lng + 180) / 360 * TEX_W;
+  const ty = lat => (90 - lat) / 180 * TEX_H;
+
+  function buildSurfacePaths() {
+    unBorders = new Path2D();
+    otherBorders = new Path2D();
+    for (const f of features) {
+      const polys = f.geometry.type === 'Polygon' ? [f.geometry.coordinates] : f.geometry.coordinates;
+      const p = new Path2D();
+      let x0 = 180, y0 = 90, x1 = -180, y1 = -90;
+      for (const poly of polys) for (const ring of poly) {
+        ring.forEach(([lng, lat], i) => {
+          i ? p.lineTo(tx(lng), ty(lat)) : p.moveTo(tx(lng), ty(lat));
+          if (lng < x0) x0 = lng; if (lng > x1) x1 = lng; if (lat < y0) y0 = lat; if (lat > y1) y1 = lat;
+        });
+        p.closePath();
+      }
+      f.path = p;
+      f.bbox = [x0, y0, x1, y1];
+      (f.country ? unBorders : otherBorders).addPath(p);
+    }
+  }
+
+  function schedulePaint() {
+    if (paintQueued) return;
+    paintQueued = true;
+    setTimeout(paintSurface, 0);
+  }
+  function paintSurface() {
+    paintQueued = false;
+    if (!features.length) return;
+    const sel = state.selected;
+    if (skyReady) sg.drawImage(sky, 0, 0, TEX_W, TEX_H);
+    else { sg.fillStyle = '#071c27'; sg.fillRect(0, 0, TEX_W, TEX_H); }
+    for (const f of features) {
+      sg.fillStyle = f.country ? colourFor(f.country.iso3, sel ? 0.35 : 1) : (sel ? 'rgba(40,60,70,0.05)' : 'rgba(60,80,90,0.12)');
+      sg.fill(f.path, 'evenodd');
+    }
+    sg.lineJoin = 'round';
+    sg.lineWidth = 1.4;
+    sg.strokeStyle = 'rgba(0, 229, 255, 0.18)';
+    sg.stroke(otherBorders);
+    sg.lineWidth = 1.8;
+    sg.strokeStyle = sel ? 'rgba(0, 229, 255, 0.35)' : 'rgba(0, 229, 255, 0.6)';
+    sg.stroke(unBorders);
+    if (hotOn) {
+      for (const h of state.hotspots) {
+        // widen by 1/cos(lat) so dots stay round on the sphere
+        const x = tx(h.lng), y = ty(h.lat), r = 4 + h.t * 9, k = 1 / Math.max(0.2, Math.cos(h.lat * Math.PI / 180));
+        const col = hotColour(h);
+        sg.fillStyle = `rgba(${col}, 0.22)`;
+        sg.beginPath(); sg.ellipse(x, y, r * 2.4 * k, r * 2.4, 0, 0, Math.PI * 2); sg.fill();
+        sg.fillStyle = `rgba(${col}, 0.95)`;
+        sg.beginPath(); sg.ellipse(x, y, r * k, r, 0, 0, Math.PI * 2); sg.fill();
+      }
+    }
+    pushTexture();
+  }
+  function pushTexture() {
+    if (texObj) { texObj.needsUpdate = true; return; }
+    if (bootstrapping) return;
+    // first time: let globe.gl create its texture from an image, then keep feeding it our canvas
+    bootstrapping = true;
+    const prev = mat.map, until = performance.now() + 20000;
+    globe.globeImageUrl(surface.toDataURL('image/jpeg', 0.8));
+    (function waitForTexture() {
+      if (mat.map && mat.map !== prev) {
+        texObj = mat.map;
+        texObj.image = surface;
+        texObj.anisotropy = Math.min(8, globe.renderer().capabilities.getMaxAnisotropy());
+        texObj.needsUpdate = true;
+        if (mat.color) mat.color.set('#ffffff');
+        if (mat.emissive) mat.emissive.set('#000000');
+        bootstrapping = false;
+      } else if (performance.now() < until) setTimeout(waitForTexture, 50);
+      else bootstrapping = false;
+    })();
   }
 
   // how far the selected nation rises: proportional to zoom so small states don't turn into towers
   let selAlt = 0.05;
   function styleGlobe() {
-    const sel = state.selected, hov = state.hover;
+    const sel = state.selected;
+    schedulePaint();
+    globe.polygonsData(sel?.feature ? [sel.feature] : []);
     globe
-      .polygonAltitude(f => f.country && f.country === sel ? selAlt : f.country && f.country === hov ? 0.018 : 0.007)
-      .polygonCapColor(f => {
-        if (!f.country) return sel ? 'rgba(40,60,70,0.05)' : 'rgba(60,80,90,0.12)';
-        if (f.country === sel) return 'rgba(0, 229, 255, 0.78)';
-        if (f.country === hov) return 'rgba(140, 245, 255, 0.75)';
-        return colourFor(f.country.iso3, sel ? 0.35 : 1);
-      })
-      .polygonSideColor(f => f.country === sel ? 'rgba(0, 229, 255, 0.35)' : 'rgba(0, 160, 200, 0.06)')
-      .polygonStrokeColor(f => f.country === sel ? '#d6fbff' : f.country ? 'rgba(0, 229, 255, 0.55)' : 'rgba(0, 229, 255, 0.15)')
-      .pointAltitude(c => c === sel ? selAlt + 0.003 : c.shape ? 0.012 : 0.03)
-      .pointRadius(c => c === sel ? 0.05 : c.shape ? (sel ? 0.045 : 0.1) : (sel ? 0.15 : 0.32))
-      .pointColor(c => c === sel ? '#ffb300' : c === hov ? '#ffffff' : c.shape ? 'rgba(160, 245, 255, 0.85)' : '#00e5ff');
+      .pointAltitude(c => c === sel ? selAlt + 0.003 : c.shape ? 0.008 : 0.02)
+      .pointRadius(c => c === sel ? 0.05 : c.shape ? (sel ? 0.045 : 0.09) : (sel ? 0.15 : 0.3))
+      .pointColor(c => c === sel ? '#ffb300' : c.shape ? 'rgba(160, 245, 255, 0.85)' : '#00e5ff');
+    updateHoverOutline();
+  }
+  function updateHoverOutline() {
+    const f = state.hover && state.hover !== state.selected ? state.hover.feature : null;
+    if (!f) { globe.pathsData([]); return; }
+    const polys = f.geometry.type === 'Polygon' ? [f.geometry.coordinates] : f.geometry.coordinates;
+    globe.pathsData(polys.map(p => p[0]).filter(r => r.length > 6).sort((a, b) => b.length - a.length).slice(0, 14));
   }
 
   // ------------------------------------------------------------ hover tooltip
@@ -369,7 +488,6 @@
     tooltip.style.left = x + 'px';
     tooltip.style.top = y + 'px';
   }
-  let hoverTimer = null;
   function setHover(c) {
     if (!mouseOnGlobe) c = null; // globe.gl re-fires hover during camera flights at a stale pointer position
     const country = c && !c.nonUN && !c.hot ? c : null;
@@ -397,7 +515,7 @@
       tooltip.style.display = 'block'; placeTooltip();
     }
     document.body.style.cursor = c ? 'pointer' : '';
-    if (changed) { clearTimeout(hoverTimer); hoverTimer = setTimeout(styleGlobe, 16); }
+    if (changed) updateHoverOutline();
   }
 
   // ------------------------------------------------------------ selection
@@ -1053,19 +1171,15 @@
   let nightOn = store.get('opt.night', true);
   let lightsReady = null;
   async function updateSky() {
-    lightsReady ||= DayNight.loadLights('https://cdn.jsdelivr.net/npm/three-globe@2.44.0/example/img/earth-night.jpg');
-    await lightsReady;
-    const { canvas, sun } = DayNight.render({ night: nightOn });
-    // switch the material to "show the texture as-is" only once the new texture is on,
-    // otherwise the globe flashes white while it loads
-    const prevMap = mat.map, until = performance.now() + 15000;
-    globe.globeImageUrl(canvas.toDataURL('image/jpeg', 0.9));
-    (function waitForTexture() {
-      if (mat.map && mat.map !== prevMap) {
-        if (mat.color) mat.color.set('#ffffff');
-        if (mat.emissive) mat.emissive.set('#000000');
-      } else if (performance.now() < until) requestAnimationFrame(waitForTexture);
-    })();
+    // city lights (a 700 KB image) arrive in the background and trigger one more repaint;
+    // never make the shading wait for them
+    lightsReady ||= DayNight.loadLights('https://cdn.jsdelivr.net/npm/three-globe@2.44.0/example/img/earth-night.jpg')
+      .then(() => updateSky());
+    const img = await DayNight.render({ night: nightOn });
+    sky.getContext('2d').putImageData(img, 0, 0);
+    skyReady = true;
+    schedulePaint();
+    const sun = DayNight.subsolar(new Date());
     $('hudSun').textContent = nightOn
       ? `SUN OVERHEAD ${Math.abs(sun.lat).toFixed(1)}°${sun.lat >= 0 ? 'N' : 'S'} · ${Math.abs(sun.lng).toFixed(1)}°${sun.lng >= 0 ? 'E' : 'W'}`
       : 'SHADING OFF';
@@ -1078,8 +1192,7 @@
     return h.conflict >= 0.32 ? [255, 77, 94] : h.conflict >= 0.22 ? [255, 140, 40] : [255, 205, 80];
   }
   function countryAt(lat, lng) {
-    const f = features.find(f => f.country && featureContains(f, lng, lat));
-    return f ? f.country : null;
+    return featureAt(lat, lng)?.country || null;
   }
   const stampIso = s => `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)}T${s.slice(8, 10)}:${s.slice(10, 12)}:${s.slice(12, 14)}Z`;
   async function loadHotspots() {
@@ -1094,11 +1207,11 @@
     updateHotspots();
   }
   function updateHotspots() {
-    globe.labelsData(hotOn ? state.hotspots : []);
+    schedulePaint();
     updateRings();
   }
   function updateRings() {
-    const data = hotOn ? state.hotspots.slice() : [];
+    const data = hotOn ? state.hotspots.slice(0, 24) : [];
     if (state.selected) data.push({ sel: true, lat: state.selected.lat, lng: state.selected.lng });
     globe.ringsData(data);
   }
@@ -1229,8 +1342,8 @@
           globe.pointOfView({ ...p, altitude: Math.max(0.25, Math.min(5, p.altitude * Math.exp(dy * 0.008))) });
         },
         select(x, y) {
-          const c = pickAt(x, y);
-          if (c) select(c);
+          const hit = hitTest(x, y);
+          if (hit) activate(hit);
           else toast('NOTHING UNDER CURSOR');
         },
         close() { deselect(); },
@@ -1338,7 +1451,7 @@
     if (!ONLINE) toast('OFFLINE MODE · SERVE THE public/ FOLDER OVER HTTP (SEE README)');
 
     setInterval(loadHotspots, 30 * 60 * 1000);
-    setInterval(updateSky, 60 * 1000);
+    setInterval(updateSky, 2 * 60 * 1000);
     loadTicker();
     setInterval(loadTicker, 15 * 60 * 1000);
     setInterval(() => { if (state.selected && state.tab === 'news') renderTab(); }, 15 * 60 * 1000);

@@ -14,7 +14,7 @@
   --green: #3dffa8;
   --text: #cfefff;
   --muted: #6c97ab;
-  --panel: rgba(2, 16, 26, 0.72);
+  --panel: rgba(2, 16, 26, 0.88);
   --panel-border: rgba(0, 229, 255, 0.35);
   --glow: 0 0 6px rgba(0, 229, 255, 0.8), 0 0 18px rgba(0, 229, 255, 0.35);
   --font-hud: "Orbitron", "Segoe UI", sans-serif;
@@ -192,7 +192,7 @@ body.focused .globe-rings { opacity: 0; }
   position: fixed; z-index: 15;
   background: var(--panel);
   border: 1px solid var(--panel-border);
-  backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+  
   box-shadow: inset 0 0 40px rgba(0, 229, 255, .05), 0 0 30px rgba(0, 0, 0, .5);
 }
 .panel-head {
@@ -474,7 +474,7 @@ body.focused #hud { opacity: .5; }
   width: min(580px, calc(100vw - 700px)); min-width: 400px;
   display: flex; align-items: center; gap: 12px; padding: 9px 12px;
   background: var(--panel); border: 1px solid var(--panel-border);
-  backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+  
   clip-path: polygon(12px 0, 100% 0, 100% calc(100% - 12px), calc(100% - 12px) 100%, 0 100%, 0 12px);
   transition: left .8s cubic-bezier(.7, 0, .2, 1);
 }
@@ -684,7 +684,7 @@ body.focused #yearStamp { left: calc(50% + 16vw); }
 #handPanel {
   position: fixed; z-index: 17; right: 18px; bottom: calc(var(--foot) + 14px); width: 176px;
   background: var(--panel); border: 1px solid var(--panel-border);
-  backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); animation: holo-in .6s linear backwards;
+   animation: holo-in .6s linear backwards;
 }
 #handPanel[hidden] { display: none; }
 .hp-head { display: flex; align-items: center; gap: 6px; padding: 6px 8px; border-bottom: 1px solid var(--cyan-faint); font-family: var(--font-hud); font-size: 9px; letter-spacing: 1.5px; color: var(--cyan-2); }
