@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ATLAS · Global Intelligence</title>
+  <meta name="description" content="Holographic globe tracking news, GDP, imports and exports for every UN member state.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;900&family=Rajdhani:wght@400;500;600;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <!-- ambient layers -->
+  <div class="bg-grid"></div>
+  <div class="bg-vignette"></div>
+  <div class="scanline"></div>
+
+  <!-- globe -->
+  <div id="globeWrap">
+    <div id="globe"></div>
+    <div class="globe-rings" aria-hidden="true">
+      <div class="ring r1"></div><div class="ring r2"></div><div class="ring r3"></div>
+      <svg class="ring-ticks" viewBox="0 0 100 100"><circle cx="50" cy="50" r="49" /></svg>
+    </div>
+  </div>
+
+  <!-- connector line + lock-on marker (sketch: panel -> elbow line -> capital) -->
+  <svg id="link" aria-hidden="true">
+    <path id="linkPath" pathLength="1" />
+    <circle id="linkStart" r="4" />
+  </svg>
+  <div id="lock" aria-hidden="true">
+    <div class="lock-box"></div>
+    <div class="lock-diamond"></div>
+    <div class="lock-label" id="lockLabel"></div>
+  </div>
+
+  <!-- top bar -->
+  <header id="topbar">
+    <div class="brand">
+      <div class="reactor"><i></i><i></i><i></i></div>
+      <div>
+        <div class="brand-name">A.T.L.A.S.</div>
+        <div class="brand-sub">GLOBAL ECONOMIC INTELLIGENCE MATRIX</div>
+      </div>
+    </div>
+
+    <div class="search">
+      <span class="search-icon">⌖</span>
+      <input id="search" type="text" placeholder="LOCATE NATION…  ( / )" autocomplete="off" spellcheck="false">
+      <ul id="searchResults"></ul>
+    </div>
+
+    <div class="layers" id="layers" role="tablist" aria-label="Globe data layer">
+      <button data-ind="NY.GDP.MKTP.CD" class="on">GDP</button>
+      <button data-ind="NY.GDP.PCAP.CD">PER CAPITA</button>
+      <button data-ind="NE.EXP.GNFS.CD">EXPORTS</button>
+      <button data-ind="NE.IMP.GNFS.CD">IMPORTS</button>
+      <button data-ind="NY.GDP.MKTP.KD.ZG">GROWTH</button>
+    </div>
+
+    <div class="clock">
+      <div id="clock">--:--:--</div>
+      <div class="clock-sub">UTC · <span id="sysStatus">BOOTING</span></div>
+    </div>
+  </header>
+
+  <!-- left: nations index -->
+  <aside id="index" class="panel">
+    <div class="panel-head">
+      <span class="tag">IDX</span> NATIONS INDEX
+      <span class="count" id="indexCount">0</span>
+    </div>
+    <div class="index-tabs">
+      <button data-tab="all" class="on">ALL</button>
+      <button data-tab="watch">WATCHLIST ★</button>
+    </div>
+    <div class="index-sort">
+      SORTED BY <b id="indexMetric">GDP</b>
+    </div>
+    <ol id="indexList"></ol>
+  </aside>
+
+  <!-- left: dossier (selected country) -->
+  <section id="dossier" class="panel" aria-live="polite">
+    <span class="corner tl"></span><span class="corner tr"></span><span class="corner bl"></span><span class="corner br"></span>
+    <div class="dossier-head" id="dossierAnchor">
+      <div class="d-flag" id="dFlag"></div>
+      <div class="d-title">
+        <div class="d-sub" id="dSub">TARGET</div>
+        <h1 id="dName">—</h1>
+        <div class="d-meta" id="dMeta"></div>
+      </div>
+      <div class="d-actions">
+        <button id="watchBtn" title="Add to watchlist">☆</button>
+        <button id="closeBtn" title="Close (Esc)">✕</button>
+      </div>
+    </div>
+
+    <div class="boot" id="boot"></div>
+
+    <nav class="d-tabs" id="dTabs">
+      <button data-tab="economy" class="on">ECONOMY</button>
+      <button data-tab="trade">TRADE</button>
+      <button data-tab="news">NEWS</button>
+      <button data-tab="archive">ARCHIVE</button>
+    </nav>
+    <div class="d-body" id="dBody"></div>
+  </section>
+
+  <!-- right HUD readouts -->
+  <aside id="hud">
+    <div class="hud-block">
+      <div class="hud-label">ORBIT</div>
+      <div class="hud-val" id="hudPov">LAT 0.0 · LNG 0.0 · ALT 2.50</div>
+    </div>
+    <div class="hud-block">
+      <div class="hud-label">LAYER · <span id="legendTitle">GDP (current US$)</span></div>
+      <div class="legend"><span id="legendMin">low</span><i id="legendBar"></i><span id="legendMax">high</span></div>
+    </div>
+    <div class="hud-block">
+      <div class="hud-label">TRACKING</div>
+      <div class="hud-val"><b>193</b> UN MEMBER STATES · <b>2</b> OBSERVERS</div>
+    </div>
+    <div class="hud-block">
+      <div class="hud-label">WORLD GDP <span id="worldYear"></span></div>
+      <div class="hud-big" id="worldGdp">—</div>
+    </div>
+    <div class="hud-block">
+      <div class="hud-label">UPLINKS</div>
+      <div class="hud-val small">ECON · WORLD BANK WDI<br>NEWS · GDELT PROJECT</div>
+    </div>
+  </aside>
+
+  <!-- world news ticker -->
+  <footer id="ticker">
+    <div class="ticker-label">WORLD FEED</div>
+    <div class="ticker-track"><div class="ticker-inner" id="tickerInner">ESTABLISHING UPLINK…</div></div>
+  </footer>
+
+  <div id="tooltip"></div>
+  <div id="toast"></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/globe.gl@2.45.3/dist/globe.gl.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/topojson-client@3.1.0/dist/topojson-client.min.js"></script>
+  <script src="js/countries.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
