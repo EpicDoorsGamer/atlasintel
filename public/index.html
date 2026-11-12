@@ -11,6 +11,20 @@
   <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
+  <!-- boot-up intro (removed after ENGAGE) -->
+  <div id="intro" role="dialog" aria-label="ATLAS start-up">
+    <div class="intro-scan"></div>
+    <div class="intro-core">
+      <svg class="intro-globe" viewBox="-160 -160 320 320" aria-hidden="true"></svg>
+      <div class="intro-title">A.T.L.A.S.</div>
+      <div class="intro-sub">GLOBAL ECONOMIC INTELLIGENCE MATRIX</div>
+      <div class="intro-log" aria-live="polite"></div>
+      <div class="intro-progress"><div class="intro-bar"><i></i></div><span class="intro-pct">0%</span></div>
+      <button id="engage" disabled>ENGAGE</button>
+      <div class="intro-hint">PRESS ENTER</div>
+    </div>
+  </div>
+
   <!-- ambient layers -->
   <div class="bg-grid"></div>
   <div class="bg-vignette"></div>
@@ -26,6 +40,7 @@
   </div>
 
   <!-- connector line + lock-on marker (sketch: panel -> elbow line -> capital) -->
+  <svg id="scan" aria-hidden="true"></svg>
   <svg id="link" aria-hidden="true">
     <path id="linkPath" pathLength="1" />
     <circle id="linkStart" r="4" />
@@ -51,6 +66,7 @@
       <input id="search" type="text" placeholder="LOCATE NATION…  ( / )" autocomplete="off" spellcheck="false">
       <ul id="searchResults"></ul>
     </div>
+    <button id="cmdBtn" class="cmd-chip" title="Command bar (Ctrl+K)">CTRL K <span>COMMAND</span></button>
 
     <div class="layers" id="layers" role="tablist" aria-label="Globe data layer">
       <button data-ind="NY.GDP.MKTP.CD" class="on">GDP</button>
@@ -114,7 +130,7 @@
 
   <!-- feature toggles -->
   <div id="toggles" role="group" aria-label="Display options">
-    <button data-t="sfx" title="Sound effects">SFX</button>
+    <button data-t="hands" title="Webcam hand-gesture control (video stays on this device)">HANDS</button>
     <button data-t="night" title="Live day / night shading">NIGHT</button>
     <button data-t="hot" title="News hotspots, last 24 hours">HOTSPOTS</button>
   </div>
@@ -168,14 +184,42 @@
     <div class="ticker-track"><div class="ticker-inner" id="tickerInner">ESTABLISHING UPLINK…</div></div>
   </footer>
 
+  <!-- command bar (Ctrl+K) -->
+  <div id="cmd" hidden>
+    <div class="cmd-box">
+      <div class="cmd-input">
+        <span class="cmd-prompt">&gt;</span>
+        <input id="cmdInput" type="text" autocomplete="off" spellcheck="false"
+          placeholder="TYPE A COMMAND · top 10 exporters · go to brazil · play 2000 to 2020" aria-label="Command">
+        <kbd>ESC</kbd>
+      </div>
+      <ul id="cmdList"></ul>
+      <div id="cmdOut"></div>
+    </div>
+  </div>
+
+  <!-- webcam hand-gesture link -->
+  <div id="handPanel" hidden>
+    <div class="hp-head"><span class="tag">CAM</span> GESTURE LINK <span id="hpMode">OFF</span><button id="hpClose" title="Turn off">✕</button></div>
+    <div class="hp-view"><video id="hpVideo" playsinline muted></video><canvas id="hpCanvas" width="320" height="240"></canvas></div>
+    <div class="hp-help">
+      <span><b>OPEN HAND</b> rotate</span><span><b>PINCH + UP/DOWN</b> zoom</span>
+      <span><b>POINT + HOLD</b> select</span><span><b>FIST + HOLD</b> close</span>
+      <span class="hp-priv">VIDEO IS PROCESSED ON THIS DEVICE ONLY</span>
+    </div>
+  </div>
+  <div id="handCursor" aria-hidden="true"><i></i></div>
+
   <div id="tooltip"></div>
   <div id="toast"></div>
 
   <script src="https://cdn.jsdelivr.net/npm/globe.gl@2.45.3/dist/globe.gl.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/topojson-client@3.1.0/dist/topojson-client.min.js"></script>
   <script src="js/countries.js"></script>
-  <script src="js/sfx.js"></script>
   <script src="js/daynight.js"></script>
+  <script src="js/intro.js"></script>
+  <script src="js/hands.js"></script>
+  <script src="js/commands.js"></script>
   <script src="js/app.js"></script>
 </body>
 </html>

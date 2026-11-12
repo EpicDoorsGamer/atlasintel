@@ -218,7 +218,7 @@
     .showAtmosphere(true).atmosphereColor('#19d8ff').atmosphereAltitude(0.22)
     .showGraticules(true)
     .polygonsTransitionDuration(900)
-    .pointOfView({ lat: 22, lng: 10, altitude: 2.5 });
+    .pointOfView({ lat: 22, lng: 10, altitude: 5.5 });
 
   const mat = globe.globeMaterial();
   mat.color.set('#04141f');
@@ -370,15 +370,11 @@
     tooltip.style.top = y + 'px';
   }
   let hoverTimer = null;
-  let lastHot = null;
   function setHover(c) {
     if (!mouseOnGlobe) c = null; // globe.gl re-fires hover during camera flights at a stale pointer position
     const country = c && !c.nonUN && !c.hot ? c : null;
     const changed = country !== state.hover;
     state.hover = country;
-    if (changed && country) SFX.play('hover');
-    if (c?.hot && c !== lastHot) SFX.play('hover');
-    lastHot = c?.hot ? c : null;
     if (!c) { tooltip.style.display = 'none'; }
     else if (c.hot) {
       tooltip.innerHTML = `<div class="tt-name" style="color:rgb(${hotColour(c)})">&#9673; NEWS HOTSPOT</div>
@@ -437,9 +433,10 @@
   }
 
   let selectSeq = 0;
-  function select(c, { fromHash = false } = {}) {
+  function select(c, { fromHash = false, tab = null } = {}) {
     if (!c) return;
-    if (state.selected === c) return;
+    if (tab && tab !== state.tab) { state.tab = tab; for (const b of $('dTabs').children) b.classList.toggle('on', b.dataset.tab === tab); }
+    if (state.selected === c) { if (tab) renderTab(); return; }
     const seq = ++selectSeq;
     state.selected = c;
     tooltip.style.display = 'none';
@@ -456,12 +453,11 @@
     styleGlobe();
     updateRings();
     globe.pointOfView(view, 1700);
-    SFX.play('select');
-    setTimeout(() => { if (seq === selectSeq) SFX.play('open'); }, 380);
-    setTimeout(() => { if (seq === selectSeq) SFX.play('lock'); }, 1350);
 
     renderHeader(c);
     boot(c);
+    holoIn(['.dossier-head', '#dTabs', '#dBody'], 420);
+    setTimeout(() => { if (seq === selectSeq) laserScan(c); }, 1750);
     $('lockLabel').textContent = (c.capital || c.name).toUpperCase();
     setTimeout(() => { if (seq === selectSeq) lock.classList.add('on'); }, 1350);
     setTimeout(() => { if (seq === selectSeq) link.classList.add('on'); }, 1600);
@@ -475,12 +471,12 @@
     const c = state.selected;
     selectSeq++;
     state.selected = null;
+    clearScan();
     body.classList.remove('focused');
     link.classList.remove('on');
     lock.classList.remove('on');
     updateRings();
     styleGlobe();
-    SFX.play('close');
     globe.pointOfView({ lat: c.lat, lng: c.lng, altitude: 2.5 }, 1400);
     setTimeout(() => { if (!state.selected) controls.autoRotate = true; }, 1500);
     history.replaceState(null, '', location.pathname);
@@ -543,15 +539,14 @@
     ];
     el.innerHTML = lines.map((l, i) => `<div style="animation-delay:${i * 0.22}s">${esc(l)} <span class="ok">[OK]</span></div>`).join('');
     el.classList.add('on');
-    lines.forEach((_, i) => setTimeout(() => SFX.play('type'), 120 + i * 220));
     clearTimeout(boot.t);
     boot.t = setTimeout(() => el.classList.remove('on'), 2300);
   }
 
   function setTab(t) {
-    if (t !== state.tab) SFX.play('tab');
     state.tab = t;
     for (const b of $('dTabs').children) b.classList.toggle('on', b.dataset.tab === t);
+    holoIn(['#dBody']);
     renderTab();
   }
 
@@ -711,7 +706,6 @@
 
     try {
       const live = await gdelt(`"${c.name}" sourcelang:english`, { force, max: 75 });
-      if (stillOn(c, 'news')) SFX.play('data');
       draw({ items: rankNews(c, live.items), fetched: live.fetched, label: live.stale ? 'LAST LIVE SCAN' : 'LIVE · 7 DAYS' },
         live.stale ? { err: true, text: 'LIVE FEED BUSY · SHOWING LAST LIVE SCAN' } : null);
     } catch (e) {
@@ -842,7 +836,6 @@
   document.querySelector('.index-tabs').addEventListener('click', e => {
     const b = e.target.closest('button');
     if (!b) return;
-    SFX.play('click');
     state.indexTab = b.dataset.tab;
     for (const x of b.parentNode.children) x.classList.toggle('on', x === b);
     renderIndex();
@@ -860,7 +853,6 @@
     if (!c) return;
     state.watch.has(c.iso3) ? state.watch.delete(c.iso3) : state.watch.add(c.iso3);
     store.set('watch', [...state.watch]);
-    SFX.play(state.watch.has(c.iso3) ? 'toggleOn' : 'toggleOff');
     updateWatchBtn();
     renderIndex();
     toast(state.watch.has(c.iso3) ? `${c.name.toUpperCase()} ADDED TO WATCHLIST` : `${c.name.toUpperCase()} REMOVED FROM WATCHLIST`);
@@ -899,7 +891,7 @@
     state.global[ind] = await getJSON(`api/global/${ind}.json`);
     computeRanks(ind);
   }
-  $('layers').addEventListener('click', e => { const b = e.target.closest('button'); if (b) { SFX.play('click'); setLayer(b.dataset.ind); } });
+  $('layers').addEventListener('click', e => { const b = e.target.closest('button'); if (b) setLayer(b.dataset.ind); });
 
   // ------------------------------------------------------------ search
   const search = $('search'), results = $('searchResults');
@@ -943,19 +935,23 @@
   $('closeBtn').onclick = deselect;
   $('dTabs').addEventListener('click', e => { const b = e.target.closest('button'); if (b) setTab(b.dataset.tab); });
   addEventListener('keydown', e => {
-    if (e.key === 'Escape' && document.activeElement !== search) deselect();
-    if (e.key === '/' && document.activeElement !== search) { e.preventDefault(); search.focus(); }
+    if (!body.classList.contains('engaged') || CommandBar.isOpen) return;
+    const typing = /^(INPUT|TEXTAREA)$/.test(document.activeElement?.tagName);
+    if (e.key === 'Escape' && !typing) deselect();
+    if (e.key === '/' && !typing) { e.preventDefault(); search.focus(); }
   });
+  $('cmdBtn').addEventListener('click', () => CommandBar.open());
   addEventListener('hashchange', () => {
+    if (!body.classList.contains('engaged')) return;
     const c = byIso3.get(location.hash.slice(1).toUpperCase());
     if (c) select(c, { fromHash: true });
   });
 
   function toast(msg) {
     const t = $('toast');
-    SFX.play('alert');
     t.textContent = msg;
     t.classList.add('on');
+    holoIn([t]);
     clearTimeout(toast.t);
     toast.t = setTimeout(() => t.classList.remove('on'), 3200);
   }
@@ -998,7 +994,7 @@
   let playTimer = null;
   const historyYears = () => state.history[state.layer]?.years || [];
 
-  function setYear(y, { sound = true } = {}) {
+  function setYear(y) {
     if (y === state.year) return;
     state.year = y;
     body.classList.toggle('time-travel', y != null);
@@ -1009,7 +1005,6 @@
     const yrs = historyYears();
     tRange.value = y ?? (yrs.at(-1) || tRange.max);
     rangeFill();
-    if (sound) SFX.play('tick');
     styleGlobe();
     renderIndex();
   }
@@ -1028,6 +1023,14 @@
     tRange.value = state.year ?? yrs.at(-1);
     rangeFill();
   }
+  function playRange(from, to) {
+    stopPlay();
+    let y = from;
+    setYear(y);
+    tPlay.textContent = '❚❚';
+    tPlay.classList.add('on');
+    playTimer = setInterval(() => (y >= to ? stopPlay() : setYear(++y)), 650);
+  }
   function stopPlay() {
     clearInterval(playTimer);
     playTimer = null;
@@ -1036,17 +1039,12 @@
   }
   function initTimebar() {
     tRange.addEventListener('input', () => { stopPlay(); setYear(+tRange.value); });
-    tLive.addEventListener('click', () => { stopPlay(); SFX.play('toggleOff'); setYear(null, { sound: false }); });
+    tLive.addEventListener('click', () => { stopPlay(); setYear(null); });
     tPlay.addEventListener('click', () => {
-      SFX.play('click');
       if (playTimer) return stopPlay();
       const yrs = historyYears();
       if (!yrs.length) return;
-      let y = state.year == null || state.year >= yrs.at(-1) ? yrs[0] : state.year;
-      setYear(y);
-      tPlay.textContent = '❚❚';
-      tPlay.classList.add('on');
-      playTimer = setInterval(() => (y >= yrs.at(-1) ? stopPlay() : setYear(++y)), 650);
+      playRange(state.year == null || state.year >= yrs.at(-1) ? yrs[0] : state.year, yrs.at(-1));
     });
     configureRange();
   }
@@ -1116,66 +1114,237 @@
       </li>`).join('')}</ul>`;
   }
 
-  // ------------------------------------------------------------ toggles (SFX / night / hotspots)
+  // ------------------------------------------------------------ toggles (hands / night / hotspots)
   function renderToggles() {
     const set = (k, on) => document.querySelector(`#toggles [data-t="${k}"]`).classList.toggle('on', on);
-    set('sfx', !SFX.muted);
+    set('hands', Hands.active);
     set('night', nightOn);
     set('hot', hotOn);
   }
+  function setOption(k, on) {
+    if (k === 'hands') return toggleHands(on);
+    if (k === 'night') { nightOn = on ?? !nightOn; store.set('opt.night', nightOn); updateSky(); }
+    if (k === 'hot') { hotOn = on ?? !hotOn; store.set('opt.hot', hotOn); updateHotspots(); }
+    renderToggles();
+  }
   $('toggles').addEventListener('click', e => {
     const b = e.target.closest('button');
-    if (!b) return;
-    const k = b.dataset.t;
-    let on;
-    if (k === 'sfx') { SFX.setMuted(!SFX.muted); on = !SFX.muted; }
-    if (k === 'night') { nightOn = !nightOn; on = nightOn; store.set('opt.night', nightOn); updateSky(); }
-    if (k === 'hot') { hotOn = !hotOn; on = hotOn; store.set('opt.hot', hotOn); updateHotspots(); }
-    SFX.play(on ? 'toggleOn' : 'toggleOff');
-    renderToggles();
+    if (b) setOption(b.dataset.t);
   });
 
-  // quiet hover blips on interactive HUD elements
-  let lastHoverEl = null;
-  document.addEventListener('mouseover', e => {
-    const el = e.target.closest('button, #indexList li[data-iso], #searchResults li[data-iso], .news a, .hotlist a');
-    if (el && el !== lastHoverEl) SFX.play('hover');
-    lastHoverEl = el;
+
+  // ------------------------------------------------------------ hologram effects
+  // flicker/glitch elements in (staggered); accepts selectors or elements
+  function holoIn(targets, delay = 0) {
+    targets.forEach((t, i) => {
+      const el = typeof t === 'string' ? document.querySelector(t) : t;
+      if (!el) return;
+      el.classList.remove('holo-in');
+      void el.offsetWidth; // restart the animation
+      el.style.animationDelay = `${delay + i * 90}ms`;
+      el.classList.add('holo-in');
+    });
+  }
+
+  // laser sweep across the selected country, clipped to its on-screen outline
+  const scanSvg = $('scan');
+  let scanTimer = null;
+  function clearScan() {
+    clearTimeout(scanTimer);
+    scanSvg.classList.remove('on');
+    scanSvg.innerHTML = '';
+  }
+  function laserScan(c) {
+    clearScan();
+    const f = c.feature;
+    if (!f || matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    const pov = globe.pointOfView();
+    const horizon = Math.acos(1 / (1 + pov.altitude)) * 180 / Math.PI * 0.98;
+    const wr = wrap.getBoundingClientRect();
+    const polys = f.geometry.type === 'Polygon' ? [f.geometry.coordinates] : f.geometry.coordinates;
+    let d = '', x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const poly of polys) {
+      const ring = poly[0], stepN = Math.max(1, Math.floor(ring.length / 220)), pts = [];
+      for (let i = 0; i < ring.length; i += stepN) {
+        const [lng, lat] = ring[i];
+        if (angularDistance(pov, { lat, lng }) > horizon) continue;
+        const p = globe.getScreenCoords(lat, lng, selAlt);
+        const x = p.x + wr.left, y = p.y + wr.top;
+        if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+        pts.push(`${x.toFixed(1)},${y.toFixed(1)}`);
+        x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y);
+      }
+      if (pts.length > 2) d += `M${pts.join('L')}Z`;
+    }
+    if (!d || x1 - x0 < 6) return;
+    const w = x1 - x0, h = y1 - y0, beam = Math.max(24, w * 0.12);
+    scanSvg.innerHTML = `
+      <defs>
+        <clipPath id="scanClip"><path d="${d}"/></clipPath>
+        <linearGradient id="scanBeam" x1="0" x2="1">
+          <stop offset="0" stop-color="#00e5ff" stop-opacity="0"/>
+          <stop offset=".85" stop-color="#00e5ff" stop-opacity=".55"/>
+          <stop offset="1" stop-color="#e8feff" stop-opacity="1"/>
+        </linearGradient>
+        <pattern id="scanGrid" width="6" height="6" patternUnits="userSpaceOnUse">
+          <path d="M0 .5H6" stroke="rgba(0,229,255,.35)" stroke-width="1"/>
+        </pattern>
+      </defs>
+      <g clip-path="url(#scanClip)">
+        <rect class="scan-grid" x="${x0}" y="${y0}" width="${w}" height="${h}" fill="url(#scanGrid)"/>
+        <rect class="scan-beam" x="${x0 - beam}" y="${y0 - 2}" width="${beam}" height="${h + 4}" fill="url(#scanBeam)"/>
+      </g>
+      <path class="scan-outline" d="${d}" pathLength="1"/>
+      <text class="scan-label" x="${x0}" y="${Math.max(16, y0 - 10)}">SCANNING · ${esc(c.iso3)}</text>`;
+    scanSvg.classList.add('on');
+    const beamEl = scanSvg.querySelector('.scan-beam');
+    const dur = Math.min(1600, 700 + w * 1.5);
+    beamEl.animate([{ transform: 'translateX(0)' }, { transform: `translateX(${w + beam}px)` }],
+      { duration: dur, easing: 'cubic-bezier(.45,0,.25,1)', fill: 'forwards' });
+    scanTimer = setTimeout(() => {
+      const label = scanSvg.querySelector('.scan-label');
+      if (label) label.textContent = `SCAN COMPLETE · ${c.iso3}`;
+      scanSvg.classList.add('done');
+      scanTimer = setTimeout(clearScan, 900);
+    }, dur);
+  }
+  // a manual drag moves the globe under the overlay: drop it
+  $('globe').addEventListener('pointerdown', () => { if (scanSvg.classList.contains('on')) clearScan(); });
+
+  // ------------------------------------------------------------ hand-gesture control
+  async function toggleHands(force) {
+    const want = force ?? !Hands.active;
+    if (want === Hands.active) return renderToggles();
+    if (!want) { Hands.stop(); return renderToggles(); }
+    try {
+      await Hands.start({
+        rotate(dx, dy) {
+          const p = globe.pointOfView(), k = 0.09 * p.altitude;
+          controls.autoRotate = false;
+          globe.pointOfView({ lat: Math.max(-85, Math.min(85, p.lat + dy * k)), lng: p.lng - dx * k, altitude: p.altitude });
+        },
+        zoom(dy) {
+          const p = globe.pointOfView();
+          controls.autoRotate = false;
+          globe.pointOfView({ ...p, altitude: Math.max(0.25, Math.min(5, p.altitude * Math.exp(dy * 0.008))) });
+        },
+        select(x, y) {
+          const c = pickAt(x, y);
+          if (c) select(c);
+          else toast('NOTHING UNDER CURSOR');
+        },
+        close() { deselect(); },
+        idle() { if (!state.selected) controls.autoRotate = true; },
+        onStateChange: renderToggles,
+      });
+      toast('HAND LINK ACTIVE · VIDEO STAYS ON THIS DEVICE');
+    } catch (e) {
+      toast('HAND TRACKING UNAVAILABLE · ' + (e.message || e));
+    }
+    renderToggles();
+  }
+
+  // ------------------------------------------------------------ command bar wiring
+  CommandBar.init({
+    countries: COUNTRIES,
+    byIso3: iso => byIso3.get(iso),
+    flag: c => `<span class="fl">${flagImg(c, 40)}</span>`,
+    select: (c, tab) => select(c, { tab }),
+    reset() { stopPlay(); setYear(null); deselect(); },
+    setLayer: ind => setLayer(ind),
+    setYear(y) { stopPlay(); setYear(y); },
+    play: (from, to) => playRange(from, to),
+    years() { const y = historyYears(); return y.length ? [y[0], y.at(-1)] : [1990, new Date().getFullYear() - 1]; },
+    layerLabel: (ind = state.layer) => LAYERS[ind].short,
+    fmt: (ind, v) => LAYERS[ind].fmt(v),
+    async top(ind, n, asc, year) {
+      await setLayer(ind);
+      stopPlay();
+      setYear(year ?? null);
+      const vals = valuesFor(ind) || {};
+      return COUNTRIES.filter(c => vals[c.iso3])
+        .map(c => ({ c, v: vals[c.iso3][1] }))
+        .sort((a, b) => asc ? a.v - b.v : b.v - a.v)
+        .slice(0, n);
+    },
+    toggle: (k, on) => setOption(k, on),
+    watch(c) {
+      state.watch.has(c.iso3) ? state.watch.delete(c.iso3) : state.watch.add(c.iso3);
+      store.set('watch', [...state.watch]);
+      updateWatchBtn();
+      renderIndex();
+      return state.watch.has(c.iso3);
+    },
+    async compare(cs) {
+      const data = await Promise.all(cs.map(c => getEcon(c).catch(() => null)));
+      const rows = [
+        ['GDP', 'gdp', usd, true],
+        ['Real growth', 'gdpGrowth', pct, true],
+        ['GDP per capita', 'gdpPerCapita', usd, true],
+        ['Population', 'population', big, null],
+        ['Exports', 'exports', usd, true],
+        ['Imports', 'imports', usd, null],
+        ['Inflation', 'inflation', pctPlain, false],
+        ['Unemployment', 'unemployment', pctPlain, false],
+        ['Gov. debt / GDP', 'debt', pctPlain, false],
+      ];
+      const cell = (d, key) => latest(d?.series?.[key]);
+      return `<div class="cmd-title">COMPARISON · LATEST REPORTED</div>
+        <table class="cmd-compare"><thead><tr><th></th>${cs.map(c => `<th data-iso="${c.iso3}">${flagImg(c, 40)}<br>${esc(c.name)}</th>`).join('')}</tr></thead>
+        <tbody>${rows.map(([label, key, fmt, higherBetter]) => {
+          const vals = data.map(d => cell(d, key));
+          const nums = vals.map(v => v?.[1]).filter(v => v != null);
+          const best = higherBetter == null || !nums.length ? null : higherBetter ? Math.max(...nums) : Math.min(...nums);
+          return `<tr><td>${label}</td>${vals.map(v => `<td class="${v && v[1] === best && nums.length > 1 ? 'best' : ''}">${v ? fmt(v[1]) : '—'}<small>${v ? v[0] : ''}</small></td>`).join('')}</tr>`;
+        }).join('')}</tbody></table>`;
+    },
   });
 
   // ------------------------------------------------------------ boot
   async function main() {
     tick();
     const status = $('sysStatus');
+    Intro.step('LINKING ORBITAL RENDERER', 8);
     try {
       await loadGeometry();
+      Intro.step(`MAPPING ${features.length} TERRITORIES · ${COUNTRIES.length} NATIONS`, 40);
     } catch (e) {
       status.textContent = 'GEO FAULT';
+      Intro.step('WORLD GEOMETRY UPLINK', 100, true);
+      await Intro.ready();
       toast('COULD NOT LOAD WORLD GEOMETRY · CHECK INTERNET CONNECTION');
       return;
     }
     renderIndex();
-    if (!ONLINE) {
-      status.textContent = 'OFFLINE';
-      toast('OFFLINE MODE · SERVE THE public/ FOLDER OVER HTTP (SEE README)');
-    }
     await setLayer(state.layer);
+    Intro.step('DECRYPTING WORLD BANK ARCHIVE', 65, !state.global[state.layer]);
     loadWorldGdp();
     if (ONLINE && state.global[state.layer]) { status.textContent = 'ONLINE'; status.classList.add('ok'); }
+    else status.textContent = 'OFFLINE';
     // warm the other layers so ranks are ready in the trade tab
     ['NE.EXP.GNFS.CD', 'NE.IMP.GNFS.CD', 'NY.GDP.PCAP.CD'].forEach(ind => loadGlobal(ind).catch(() => {}));
     initTimebar();
     renderToggles();
-    loadHotspots();
+    await loadHotspots();
+    Intro.step(`TRIANGULATING ${state.hotspots.length} NEWS HOTSPOTS`, 82, !state.hotspots.length);
+    await updateSky();
+    Intro.step('COMPUTING SOLAR TERMINATOR', 96);
+
+    await Intro.ready();
+
+    // ENGAGE: fly in and glitch the HUD into existence
+    globe.pointOfView({ lat: 22, lng: 10, altitude: 2.5 }, 2200);
+    holoIn(['#topbar', '#index', '#toggles', '#hud', '#timebar', '#ticker'], 250);
+    if (!ONLINE) toast('OFFLINE MODE · SERVE THE public/ FOLDER OVER HTTP (SEE README)');
+
     setInterval(loadHotspots, 30 * 60 * 1000);
-    updateSky();
     setInterval(updateSky, 60 * 1000);
     loadTicker();
     setInterval(loadTicker, 15 * 60 * 1000);
     setInterval(() => { if (state.selected && state.tab === 'news') renderTab(); }, 15 * 60 * 1000);
 
     const fromHash = byIso3.get(location.hash.slice(1).toUpperCase());
-    if (fromHash) setTimeout(() => select(fromHash, { fromHash: true }), 900);
+    if (fromHash) setTimeout(() => select(fromHash, { fromHash: true }), 1600);
   }
   main();
 })();

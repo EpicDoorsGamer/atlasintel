@@ -10,8 +10,26 @@ It is a fully **static site**, so it can be hosted for free on Cloudflare Pages.
 - **Time slider:** drag through 1990 to today, or press ▶ to watch the world economy change year by year. The index list and rankings follow the chosen year. **LIVE** returns to the latest data.
 - **Day/night shading:** the live terminator line, with city lights on the night side. It updates every minute.
 - **News hotspots:** pulsing dots where the world's news is happening over the last 24 hours, from GDELT event data. Colour shows the share of conflict events: yellow is calm, orange is tense, red is conflict. Hover for details, or click to open that country. Each country's News tab lists its hotspots with a link to the top story.
-- **Sound effects:** synthesised HUD sounds for hover, selection, lock-on, tabs and the timeline, with no audio files. Sound starts after your first click, because browsers block it before then.
-- **Toggles:** top right: **SFX**, **NIGHT** and **HOTSPOTS**. Your choices are remembered in your browser.
+- **Boot-up intro:** a black screen with a scan line and a wireframe globe that draws itself in, while a log shows the real loading steps. Press **ENGAGE** (or Enter) to fly in.
+- **Hologram effects:** panels flicker and glitch in, HUD panels have faint scanlines, and a laser sweep scans the selected country's outline.
+- **Command bar:** press **Ctrl + K** (⌘K on a Mac) or click **CTRL K** in the top bar, then type plain-English commands:
+  - `go to brazil` or just `brazil`
+  - `news japan`, `trade germany`
+  - `top 10 exporters`, `bottom 5 growth`, `richest 10 in 2005`
+  - `compare germany and france` (up to 4 countries)
+  - `play 2000 to 2020`, `year 1998`, `live`
+  - `layer imports`
+  - `night off`, `hotspots on`, `hands on`
+  - `watch netherlands`
+  - `reset`, `help`
+- **Hand-gesture control (HANDS):** turn it on, allow the camera, then:
+  - **Open hand and move:** rotate the globe.
+  - **Pinch and move up/down:** zoom.
+  - **Point and hold still:** select a country.
+  - **Fist and hold:** close the dossier.
+
+  It uses Google MediaPipe hand tracking in the browser. The video is processed on your device and is never uploaded. The model (about 8 MB) downloads only the first time you turn HANDS on.
+- **Toggles:** top right: **HANDS**, **NIGHT** and **HOTSPOTS**. Your choices are remembered in your browser.
 
 ---
 
