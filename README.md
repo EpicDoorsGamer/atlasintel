@@ -4,6 +4,15 @@ A sci-fi, holographic 3D globe that tracks **news, GDP, imports, exports and oth
 
 It is a fully **static site**, so it can be hosted for free on Cloudflare Pages. A daily GitHub Action keeps the data fresh.
 
+## Features
+
+- **Globe:** country colours by GDP, GDP per capita, exports, imports or growth. Click a country for a fly-in, a lock-on animation and a dossier with Economy, Trade, News and Archive tabs.
+- **Time slider:** drag through 1990 to today, or press ▶ to watch the world economy change year by year. The index list and rankings follow the chosen year. **LIVE** returns to the latest data.
+- **Day/night shading:** the live terminator line, with city lights on the night side. It updates every minute.
+- **News hotspots:** pulsing dots where the world's news is happening over the last 24 hours, from GDELT event data. Colour shows the share of conflict events: yellow is calm, orange is tense, red is conflict. Hover for details, or click to open that country. Each country's News tab lists its hotspots with a link to the top story.
+- **Sound effects:** synthesised HUD sounds for hover, selection, lock-on, tabs and the timeline, with no audio files. Sound starts after your first click, because browsers block it before then.
+- **Toggles:** top right: **SFX**, **NIGHT** and **HOTSPOTS**. Your choices are remembered in your browser.
+
 ---
 
 ## How it works
@@ -13,6 +22,9 @@ It is a fully **static site**, so it can be hosted for free on Cloudflare Pages.
 | Economy and trade (GDP, exports, imports, inflation, …) | World Bank WDI. `build_data.py` saves it to `public/api/econ/` and `public/api/global/`. |
 | Country news | A daily GDELT snapshot in `public/api/news/` loads instantly. The browser then asks GDELT live for fresher headlines. |
 | World ticker | Same approach, using `public/api/news/_world.json`. |
+| Time slider | `public/api/history/<indicator>.json`, built from the economy files. |
+| News hotspots | `public/api/hotspots.json`, built from the last 24 hours of GDELT's raw 15-minute event files. These are plain downloads with no rate limit, and the step takes about a minute. |
+| Night lights | NASA "Black Marble" image (via the three-globe package on jsDelivr), blended in the browser. |
 | Headline archive and watchlist | Saved in each visitor's browser (localStorage). |
 | Borders and flags | `world-atlas` (Natural Earth) via jsDelivr, and flagcdn.com. |
 
@@ -44,6 +56,10 @@ To refresh the data yourself (takes about 30–45 minutes because both APIs are 
 python build_data.py
 ```
 Add `--no-news` to skip the news snapshot, or `--force` to re-download everything.
+To refresh only the news hotspots (about a minute), for example right before uploading:
+```bash
+python build_data.py --hotspots
+```
 
 ---
 

@@ -68,6 +68,10 @@
     tab: 'economy',
     indexTab: 'all',
     watch: new Set(store.get('watch', [])),
+    year: null,           // null = latest reported values; a number = time-slider year
+    history: {},          // ind -> { years: [...], values: {ISO3: [v per year]} }
+    yearCache: {},
+    hotspots: [],         // news hotspots (last 24 h of GDELT events)
   };
 
   // ------------------------------------------------------------ data
@@ -150,21 +154,44 @@
     const i = Math.min(RAMP.length - 2, Math.floor(t)), f = t - i;
     return RAMP[i].map((v, k) => Math.round(v + (RAMP[i + 1][k] - v) * f));
   }
+  // values shown on the globe: latest reported, or the time slider's year
+  function valuesFor(ind = state.layer) {
+    const h = state.history[ind];
+    if (state.year == null || !h) return state.global[ind]?.values;
+    const key = ind + '|' + state.year;
+    if (state.yearCache[key]) return state.yearCache[key];
+    const i = h.years.indexOf(state.year), out = {};
+    if (i >= 0) for (const [iso, arr] of Object.entries(h.values)) if (arr[i] != null) out[iso] = [state.year, arr[i]];
+    return (state.yearCache[key] = out);
+  }
+  function ranksFor(ind = state.layer) {
+    if (state.year == null || !state.history[ind]) return state.ranks[ind];
+    const key = 'rank|' + ind + '|' + state.year;
+    if (state.yearCache[key]) return state.yearCache[key];
+    const vals = valuesFor(ind);
+    const list = COUNTRIES.filter(c => vals[c.iso3]).sort((a, b) => vals[b.iso3][1] - vals[a.iso3][1]);
+    const m = new Map(list.map((c, i) => [c.iso3, i + 1]));
+    m.total = list.length;
+    return (state.yearCache[key] = m);
+  }
   function layerT(iso3, ind = state.layer) {
-    const v = state.global[ind]?.values?.[iso3];
+    const v = valuesFor(ind)?.[iso3];
     if (!v) return null;
     if (LAYERS[ind].scale === 'div') return Math.max(-1, Math.min(1, v[1] / 8));
     const [lo, hi] = domainFor(ind);
-    return v[1] > 0 ? (Math.log10(v[1]) - lo) / (hi - lo || 1) : 0;
+    return v[1] > 0 ? Math.max(0, Math.min(1, (Math.log10(v[1]) - lo) / (hi - lo || 1))) : 0;
   }
+  // colour scale: fixed across all years (from the full history) so the time slider shows real change
   function domainFor(ind) {
-    const g = state.global[ind];
-    if (!g) return [0, 1];
-    if (g._domain) return g._domain;
-    const logs = COUNTRIES.map(c => g.values[c.iso3]?.[1]).filter(v => v > 0).map(Math.log10).sort((a, b) => a - b);
-    // 2% / 98% quantiles so outliers don't wash everyone out
+    const h = state.history[ind], g = state.global[ind];
+    const src = h || g;
+    if (!src) return [0, 1];
+    if (src._domain) return src._domain;
+    const vals = h ? Object.values(h.values).flat() : COUNTRIES.map(c => g.values[c.iso3]?.[1]);
+    const logs = vals.filter(v => v > 0).map(Math.log10).sort((a, b) => a - b);
+    // 2% / 99% quantiles so outliers don't wash everyone out
     const q = p => logs[Math.max(0, Math.min(logs.length - 1, Math.round(p * (logs.length - 1))))];
-    return (g._domain = logs.length ? [q(0.02), q(0.98)] : [0, 1]);
+    return (src._domain = logs.length ? [q(0.02), q(0.99)] : [0, 1]);
   }
   function colourFor(iso3, alphaMul = 1) {
     const t = layerT(iso3);
@@ -276,13 +303,31 @@
       .onPointHover(c => setHover(c || null))
       .onPointClick(c => { globeClickAt = performance.now(); select(c); });
 
-    // pulse rings at the selected capital
+    // pulse rings: the selected capital (cyan) + news hotspots (amber to red with conflict share)
     globe
-      .ringColor(() => t => `rgba(0, 229, 255, ${1 - t})`)
-      .ringMaxRadius(4.5)
-      .ringPropagationSpeed(2.6)
-      .ringRepeatPeriod(850)
-      .ringAltitude(0.004);
+      .ringLat('lat').ringLng('lng')
+      .ringColor(d => d.sel ? (t => `rgba(0, 229, 255, ${1 - t})`) : (t => `rgba(${hotColour(d)}, ${(1 - t) * 0.85})`))
+      .ringMaxRadius(d => d.sel ? 4.5 : 0.8 + d.t * 3.2)
+      .ringPropagationSpeed(d => d.sel ? 2.6 : 0.9 + d.t * 1.6)
+      .ringRepeatPeriod(d => d.sel ? 850 : 2300 - d.t * 1400)
+      .ringAltitude(d => d.sel ? selAlt + 0.002 : 0.009);
+
+    // hotspot cores (a label layer with no text: just the glowing dot)
+    globe
+      .labelLat('lat').labelLng('lng')
+      .labelText(() => '')
+      .labelSize(0.01)
+      .labelDotRadius(d => 0.12 + d.t * 0.38)
+      .labelColor(d => `rgba(${hotColour(d)}, 0.95)`)
+      .labelAltitude(0.011)
+      .labelResolution(1)
+      .labelsTransitionDuration(0)
+      .onLabelHover(d => setHover(d || null))
+      .onLabelClick(d => {
+        globeClickAt = performance.now();
+        if (d.country) select(d.country);
+        else toast(`HOTSPOT · ${d.name.toUpperCase()} · OUTSIDE UN MEMBER TERRITORY`);
+      });
 
     styleGlobe();
   }
@@ -325,20 +370,33 @@
     tooltip.style.top = y + 'px';
   }
   let hoverTimer = null;
+  let lastHot = null;
   function setHover(c) {
     if (!mouseOnGlobe) c = null; // globe.gl re-fires hover during camera flights at a stale pointer position
-    const changed = c !== state.hover && !(c?.nonUN && state.hover?.nonUN === c.nonUN);
-    state.hover = c && !c.nonUN ? c : null;
+    const country = c && !c.nonUN && !c.hot ? c : null;
+    const changed = country !== state.hover;
+    state.hover = country;
+    if (changed && country) SFX.play('hover');
+    if (c?.hot && c !== lastHot) SFX.play('hover');
+    lastHot = c?.hot ? c : null;
     if (!c) { tooltip.style.display = 'none'; }
-    else if (c.nonUN) {
+    else if (c.hot) {
+      tooltip.innerHTML = `<div class="tt-name" style="color:rgb(${hotColour(c)})">&#9673; NEWS HOTSPOT</div>
+        <div class="tt-name">${esc(c.name)}</div>
+        <div class="tt-row">ARTICLES (24H): <b>${c.articles.toLocaleString('en-US')}</b></div>
+        <div class="tt-row">CONFLICT SHARE: <b>${Math.round(c.conflict * 100)}%</b> · TONE <b>${c.tone > 0 ? '+' : ''}${c.tone.toFixed(1)}</b></div>
+        ${c.source ? `<div class="tt-row">TOP SOURCE: <b>${esc(c.source)}</b></div>` : ''}
+        ${c.country ? '<div class="tt-row">CLICK TO OPEN DOSSIER</div>' : ''}`;
+      tooltip.style.display = 'block'; placeTooltip();
+    } else if (c.nonUN) {
       tooltip.innerHTML = `<div class="tt-name">${esc(c.nonUN)}</div><div class="tt-row">NOT A UN MEMBER STATE</div>`;
       tooltip.style.display = 'block'; placeTooltip();
     } else {
-      const L = LAYERS[state.layer], v = state.global[state.layer]?.values?.[c.iso3];
-      const r = state.ranks[state.layer]?.get(c.iso3);
+      const L = LAYERS[state.layer], v = valuesFor()?.[c.iso3];
+      const rk = ranksFor(), r = rk?.get(c.iso3);
       tooltip.innerHTML = `<div class="tt-name">${esc(c.name)}${c.status === 'observer' ? '<span class="obs">OBS</span>' : ''}</div>
-        <div class="tt-row">${L.short}: <b>${v ? L.fmt(v[1]) : 'N/A'}</b>${v ? ` · ${v[0]}` : ''}</div>
-        ${r ? `<div class="tt-row">RANK <b>#${r}</b> / ${state.ranks[state.layer].total}</div>` : ''}
+        <div class="tt-row">${L.short}: <b>${v ? L.fmt(v[1]) : 'N/A'}</b>${v ? ` · ${v[0]}` : state.year ? ` · ${state.year}` : ''}</div>
+        ${r ? `<div class="tt-row">RANK <b>#${r}</b> / ${rk.total}</div>` : ''}
         <div class="tt-row">CAPITAL <b>${esc(c.capital || '—')}</b></div>`;
       tooltip.style.display = 'block'; placeTooltip();
     }
@@ -396,8 +454,11 @@
     const view = viewFor(c);
     selAlt = Math.min(0.08, 0.012 + view.altitude * 0.05);
     styleGlobe();
-    globe.ringsData([c]).ringLat('lat').ringLng('lng').ringAltitude(selAlt + 0.002);
+    updateRings();
     globe.pointOfView(view, 1700);
+    SFX.play('select');
+    setTimeout(() => { if (seq === selectSeq) SFX.play('open'); }, 380);
+    setTimeout(() => { if (seq === selectSeq) SFX.play('lock'); }, 1350);
 
     renderHeader(c);
     boot(c);
@@ -417,8 +478,9 @@
     body.classList.remove('focused');
     link.classList.remove('on');
     lock.classList.remove('on');
-    globe.ringsData([]);
+    updateRings();
     styleGlobe();
+    SFX.play('close');
     globe.pointOfView({ lat: c.lat, lng: c.lng, altitude: 2.5 }, 1400);
     setTimeout(() => { if (!state.selected) controls.autoRotate = true; }, 1500);
     history.replaceState(null, '', location.pathname);
@@ -481,11 +543,13 @@
     ];
     el.innerHTML = lines.map((l, i) => `<div style="animation-delay:${i * 0.22}s">${esc(l)} <span class="ok">[OK]</span></div>`).join('');
     el.classList.add('on');
+    lines.forEach((_, i) => setTimeout(() => SFX.play('type'), 120 + i * 220));
     clearTimeout(boot.t);
     boot.t = setTimeout(() => el.classList.remove('on'), 2300);
   }
 
   function setTab(t) {
+    if (t !== state.tab) SFX.play('tab');
     state.tab = t;
     for (const b of $('dTabs').children) b.classList.toggle('on', b.dataset.tab === t);
     renderTab();
@@ -623,6 +687,7 @@
       const items = data.items;
       const archived = archiveMerge(c.iso3, items);
       out.innerHTML = `
+        ${hotspotsFor(c)}
         ${banner ? `<div class="${banner.err ? 'err' : 'loading'}" style="margin-bottom:8px;padding:8px 10px">${esc(banner.text)}</div>` : ''}
         <div class="news-bar"><span>${items.length} HEADLINES · ${esc(data.label)}${data.fetched ? ' · ' + ago(data.fetched).toUpperCase() : ''}</span>
           <button class="btn" id="newsRefresh">↻ RESCAN</button></div>
@@ -640,19 +705,20 @@
       const s = await getJSON(`api/news/${c.iso3}.json`);
       snap = { items: rankNews(c, s.items || []), fetched: s.fetched, label: 'DAILY SNAPSHOT' };
     } catch { /* no snapshot yet */ }
-    if (force) out.innerHTML = '<div class="loading">RESCANNING LIVE FEED</div>';
-    else if (snap) draw(snap, { text: 'SCANNING LIVE FEED' });
+    if (snap && !force) draw(snap, { text: 'SCANNING LIVE FEED' });
+    else out.innerHTML = `${hotspotsFor(c)}<div class="loading">${force ? 'RESCANNING' : 'SCANNING'} LIVE FEED</div>`;
     store.set('seen.' + c.iso3, new Date().toISOString());
 
     try {
       const live = await gdelt(`"${c.name}" sourcelang:english`, { force, max: 75 });
+      if (stillOn(c, 'news')) SFX.play('data');
       draw({ items: rankNews(c, live.items), fetched: live.fetched, label: live.stale ? 'LAST LIVE SCAN' : 'LIVE · 7 DAYS' },
         live.stale ? { err: true, text: 'LIVE FEED BUSY · SHOWING LAST LIVE SCAN' } : null);
     } catch (e) {
       if (snap) return draw(snap, { err: true, text: 'LIVE FEED BUSY · SHOWING DAILY SNAPSHOT' });
       const saved = store.get('archive.' + c.iso3, []);
       if (saved.length) return draw({ items: saved.slice(0, 40), label: 'SAVED IN THIS BROWSER' }, { err: true, text: 'LIVE FEED BUSY · SHOWING SAVED HEADLINES' });
-      throw e;
+      draw({ items: [], label: 'NO FEED' }, { err: true, text: e.message + ' · TRY RESCAN IN A MINUTE' });
     }
   }
 
@@ -750,14 +816,14 @@
 
   // ------------------------------------------------------------ nations index
   function renderIndex() {
-    const ind = state.layer, L = LAYERS[ind], g = state.global[ind];
-    $('indexMetric').textContent = L.short;
+    const ind = state.layer, L = LAYERS[ind], vals = valuesFor(ind);
+    $('indexMetric').textContent = L.short + (state.year ? ' · ' + state.year : '');
     let list = COUNTRIES.slice();
     if (state.indexTab === 'watch') list = list.filter(c => state.watch.has(c.iso3));
-    const val = c => g?.values?.[c.iso3]?.[1];
+    const val = c => vals?.[c.iso3]?.[1];
     list.sort((a, b) => (val(b) ?? -Infinity) - (val(a) ?? -Infinity) || a.name.localeCompare(b.name));
     $('indexCount').textContent = list.length;
-    const rk = state.ranks[ind];
+    const rk = ranksFor(ind);
     $('indexList').innerHTML = list.length ? list.map(c => {
       const v = val(c), t = layerT(c.iso3);
       return `<li data-iso="${c.iso3}">
@@ -776,6 +842,7 @@
   document.querySelector('.index-tabs').addEventListener('click', e => {
     const b = e.target.closest('button');
     if (!b) return;
+    SFX.play('click');
     state.indexTab = b.dataset.tab;
     for (const x of b.parentNode.children) x.classList.toggle('on', x === b);
     renderIndex();
@@ -793,6 +860,7 @@
     if (!c) return;
     state.watch.has(c.iso3) ? state.watch.delete(c.iso3) : state.watch.add(c.iso3);
     store.set('watch', [...state.watch]);
+    SFX.play(state.watch.has(c.iso3) ? 'toggleOn' : 'toggleOff');
     updateWatchBtn();
     renderIndex();
     toast(state.watch.has(c.iso3) ? `${c.name.toUpperCase()} ADDED TO WATCHLIST` : `${c.name.toUpperCase()} REMOVED FROM WATCHLIST`);
@@ -805,11 +873,12 @@
     const L = LAYERS[ind];
     $('legendTitle').textContent = L.label;
     try {
-      await loadGlobal(ind);
+      await Promise.all([loadGlobal(ind), loadHistory(ind).catch(() => {})]);
     } catch (e) {
       toast('LAYER DATA UNAVAILABLE · ' + e.message);
     }
     if (state.layer !== ind) return;
+    configureRange();
     if (L.scale === 'div') {
       $('legendBar').style.background = 'linear-gradient(90deg, rgba(255,120,60,.9), rgba(255,120,60,.1), rgba(0,229,255,.1), rgba(0,229,255,.9))';
       $('legendMin').textContent = '-8%'; $('legendMax').textContent = '+8%';
@@ -821,12 +890,16 @@
     styleGlobe();
     renderIndex();
   }
+  async function loadHistory(ind) {
+    if (state.history[ind]) return;
+    state.history[ind] = await getJSON(`api/history/${ind}.json`);
+  }
   async function loadGlobal(ind) {
     if (state.global[ind]) return;
     state.global[ind] = await getJSON(`api/global/${ind}.json`);
     computeRanks(ind);
   }
-  $('layers').addEventListener('click', e => { const b = e.target.closest('button'); if (b) setLayer(b.dataset.ind); });
+  $('layers').addEventListener('click', e => { const b = e.target.closest('button'); if (b) { SFX.play('click'); setLayer(b.dataset.ind); } });
 
   // ------------------------------------------------------------ search
   const search = $('search'), results = $('searchResults');
@@ -880,6 +953,7 @@
 
   function toast(msg) {
     const t = $('toast');
+    SFX.play('alert');
     t.textContent = msg;
     t.classList.add('on');
     clearTimeout(toast.t);
@@ -919,6 +993,156 @@
     if (v) { $('worldGdp').textContent = usd(v[1]); $('worldYear').textContent = '· ' + v[0]; }
   }
 
+  // ------------------------------------------------------------ time slider
+  const tRange = $('tRange'), tPlay = $('tPlay'), tLive = $('tLive');
+  let playTimer = null;
+  const historyYears = () => state.history[state.layer]?.years || [];
+
+  function setYear(y, { sound = true } = {}) {
+    if (y === state.year) return;
+    state.year = y;
+    body.classList.toggle('time-travel', y != null);
+    $('tYear').textContent = y == null ? 'LIVE' : y;
+    $('tSub').textContent = y == null ? 'LATEST REPORTED' : 'HISTORICAL VIEW';
+    $('yearStamp').textContent = y ?? '';
+    tLive.classList.toggle('on', y == null);
+    const yrs = historyYears();
+    tRange.value = y ?? (yrs.at(-1) || tRange.max);
+    rangeFill();
+    if (sound) SFX.play('tick');
+    styleGlobe();
+    renderIndex();
+  }
+  function rangeFill() {
+    const min = +tRange.min, max = +tRange.max;
+    tRange.style.setProperty('--p', ((tRange.value - min) / (max - min || 1) * 100) + '%');
+  }
+  function configureRange() {
+    const yrs = historyYears();
+    if (!yrs.length) return;
+    tRange.min = yrs[0];
+    tRange.max = yrs.at(-1);
+    $('tMin').textContent = yrs[0];
+    $('tMax').textContent = yrs.at(-1);
+    if (state.year != null) state.year = Math.min(Math.max(state.year, yrs[0]), yrs.at(-1));
+    tRange.value = state.year ?? yrs.at(-1);
+    rangeFill();
+  }
+  function stopPlay() {
+    clearInterval(playTimer);
+    playTimer = null;
+    tPlay.textContent = '▶';
+    tPlay.classList.remove('on');
+  }
+  function initTimebar() {
+    tRange.addEventListener('input', () => { stopPlay(); setYear(+tRange.value); });
+    tLive.addEventListener('click', () => { stopPlay(); SFX.play('toggleOff'); setYear(null, { sound: false }); });
+    tPlay.addEventListener('click', () => {
+      SFX.play('click');
+      if (playTimer) return stopPlay();
+      const yrs = historyYears();
+      if (!yrs.length) return;
+      let y = state.year == null || state.year >= yrs.at(-1) ? yrs[0] : state.year;
+      setYear(y);
+      tPlay.textContent = '❚❚';
+      tPlay.classList.add('on');
+      playTimer = setInterval(() => (y >= yrs.at(-1) ? stopPlay() : setYear(++y)), 650);
+    });
+    configureRange();
+  }
+
+  // ------------------------------------------------------------ day / night shading
+  let nightOn = store.get('opt.night', true);
+  let lightsReady = null;
+  async function updateSky() {
+    lightsReady ||= DayNight.loadLights('https://cdn.jsdelivr.net/npm/three-globe@2.44.0/example/img/earth-night.jpg');
+    await lightsReady;
+    const { canvas, sun } = DayNight.render({ night: nightOn });
+    // switch the material to "show the texture as-is" only once the new texture is on,
+    // otherwise the globe flashes white while it loads
+    const prevMap = mat.map, until = performance.now() + 15000;
+    globe.globeImageUrl(canvas.toDataURL('image/jpeg', 0.9));
+    (function waitForTexture() {
+      if (mat.map && mat.map !== prevMap) {
+        if (mat.color) mat.color.set('#ffffff');
+        if (mat.emissive) mat.emissive.set('#000000');
+      } else if (performance.now() < until) requestAnimationFrame(waitForTexture);
+    })();
+    $('hudSun').textContent = nightOn
+      ? `SUN OVERHEAD ${Math.abs(sun.lat).toFixed(1)}°${sun.lat >= 0 ? 'N' : 'S'} · ${Math.abs(sun.lng).toFixed(1)}°${sun.lng >= 0 ? 'E' : 'W'}`
+      : 'SHADING OFF';
+  }
+
+  // ------------------------------------------------------------ news hotspots
+  let hotOn = store.get('opt.hot', true);
+  function hotColour(h) {
+    // thresholds ≈ median and top-10% of GDELT's typical conflict share
+    return h.conflict >= 0.32 ? [255, 77, 94] : h.conflict >= 0.22 ? [255, 140, 40] : [255, 205, 80];
+  }
+  function countryAt(lat, lng) {
+    const f = features.find(f => f.country && featureContains(f, lng, lat));
+    return f ? f.country : null;
+  }
+  const stampIso = s => `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)}T${s.slice(8, 10)}:${s.slice(10, 12)}:${s.slice(12, 14)}Z`;
+  async function loadHotspots() {
+    try {
+      const d = await getJSON('api/hotspots.json');
+      const max = Math.max(1, ...d.spots.map(s => s.articles));
+      state.hotspots = d.spots.map(s => ({ ...s, hot: true, t: Math.sqrt(s.articles / max), country: countryAt(s.lat, s.lng) }));
+      $('hudHot').textContent = `${d.spots.length} SITES · ${d.hours}H WINDOW · ${ago(stampIso(d.to)).toUpperCase()}`;
+    } catch {
+      $('hudHot').textContent = 'NO SNAPSHOT YET';
+    }
+    updateHotspots();
+  }
+  function updateHotspots() {
+    globe.labelsData(hotOn ? state.hotspots : []);
+    updateRings();
+  }
+  function updateRings() {
+    const data = hotOn ? state.hotspots.slice() : [];
+    if (state.selected) data.push({ sel: true, lat: state.selected.lat, lng: state.selected.lng });
+    globe.ringsData(data);
+  }
+  function hotspotsFor(c) {
+    const list = state.hotspots.filter(h => h.country === c);
+    if (!list.length) return '';
+    return `<div class="sec-title">ACTIVE NEWS HOTSPOTS <span class="yr">LAST 24H · GDELT EVENTS</span></div>
+      <ul class="hotlist">${list.map(h => `<li>
+        <i style="background:rgb(${hotColour(h)});color:rgb(${hotColour(h)})"></i>
+        <span class="hn">${esc(h.name)}</span>
+        <span class="ha">${h.articles.toLocaleString('en-US')} ARTICLES · ${Math.round(h.conflict * 100)}% CONFLICT · TONE ${h.tone > 0 ? '+' : ''}${h.tone.toFixed(1)}</span>
+        ${h.url ? `<a href="${esc(h.url)}" target="_blank" rel="noopener noreferrer">TOP STORY ↗ ${esc(h.source)}</a>` : ''}
+      </li>`).join('')}</ul>`;
+  }
+
+  // ------------------------------------------------------------ toggles (SFX / night / hotspots)
+  function renderToggles() {
+    const set = (k, on) => document.querySelector(`#toggles [data-t="${k}"]`).classList.toggle('on', on);
+    set('sfx', !SFX.muted);
+    set('night', nightOn);
+    set('hot', hotOn);
+  }
+  $('toggles').addEventListener('click', e => {
+    const b = e.target.closest('button');
+    if (!b) return;
+    const k = b.dataset.t;
+    let on;
+    if (k === 'sfx') { SFX.setMuted(!SFX.muted); on = !SFX.muted; }
+    if (k === 'night') { nightOn = !nightOn; on = nightOn; store.set('opt.night', nightOn); updateSky(); }
+    if (k === 'hot') { hotOn = !hotOn; on = hotOn; store.set('opt.hot', hotOn); updateHotspots(); }
+    SFX.play(on ? 'toggleOn' : 'toggleOff');
+    renderToggles();
+  });
+
+  // quiet hover blips on interactive HUD elements
+  let lastHoverEl = null;
+  document.addEventListener('mouseover', e => {
+    const el = e.target.closest('button, #indexList li[data-iso], #searchResults li[data-iso], .news a, .hotlist a');
+    if (el && el !== lastHoverEl) SFX.play('hover');
+    lastHoverEl = el;
+  });
+
   // ------------------------------------------------------------ boot
   async function main() {
     tick();
@@ -940,6 +1164,12 @@
     if (ONLINE && state.global[state.layer]) { status.textContent = 'ONLINE'; status.classList.add('ok'); }
     // warm the other layers so ranks are ready in the trade tab
     ['NE.EXP.GNFS.CD', 'NE.IMP.GNFS.CD', 'NY.GDP.PCAP.CD'].forEach(ind => loadGlobal(ind).catch(() => {}));
+    initTimebar();
+    renderToggles();
+    loadHotspots();
+    setInterval(loadHotspots, 30 * 60 * 1000);
+    updateSky();
+    setInterval(updateSky, 60 * 1000);
     loadTicker();
     setInterval(loadTicker, 15 * 60 * 1000);
     setInterval(() => { if (state.selected && state.tab === 'news') renderTab(); }, 15 * 60 * 1000);

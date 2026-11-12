@@ -109,6 +109,27 @@
     <div class="d-body" id="dBody"></div>
   </section>
 
+  <!-- big faint year watermark while time-travelling -->
+  <div id="yearStamp" aria-hidden="true"></div>
+
+  <!-- feature toggles -->
+  <div id="toggles" role="group" aria-label="Display options">
+    <button data-t="sfx" title="Sound effects">SFX</button>
+    <button data-t="night" title="Live day / night shading">NIGHT</button>
+    <button data-t="hot" title="News hotspots, last 24 hours">HOTSPOTS</button>
+  </div>
+
+  <!-- time slider -->
+  <div id="timebar">
+    <button id="tPlay" title="Play through the years">▶</button>
+    <div class="t-track">
+      <input type="range" id="tRange" min="1990" max="2025" step="1" value="2025" aria-label="Year">
+      <div class="t-ends"><span id="tMin">1990</span><span>TIMELINE</span><span id="tMax">2025</span></div>
+    </div>
+    <div class="t-year"><span id="tYear">LIVE</span><small id="tSub">LATEST REPORTED</small></div>
+    <button id="tLive" class="on" title="Back to latest data">LIVE</button>
+  </div>
+
   <!-- right HUD readouts -->
   <aside id="hud">
     <div class="hud-block">
@@ -128,8 +149,16 @@
       <div class="hud-big" id="worldGdp">—</div>
     </div>
     <div class="hud-block">
+      <div class="hud-label">DAYLIGHT</div>
+      <div class="hud-val" id="hudSun">COMPUTING…</div>
+    </div>
+    <div class="hud-block">
+      <div class="hud-label">NEWS HOTSPOTS · <span style="color:#ffcd50">●</span> CALM <span style="color:#ff8c28">●</span> TENSE <span style="color:#ff4d5e">●</span> CONFLICT</div>
+      <div class="hud-val" id="hudHot">LOADING…</div>
+    </div>
+    <div class="hud-block">
       <div class="hud-label">UPLINKS</div>
-      <div class="hud-val small">ECON · WORLD BANK WDI<br>NEWS · GDELT PROJECT</div>
+      <div class="hud-val small">ECON · WORLD BANK WDI<br>NEWS · GDELT PROJECT<br>NIGHT LIGHTS · NASA BLACK MARBLE</div>
     </div>
   </aside>
 
@@ -145,6 +174,8 @@
   <script src="https://cdn.jsdelivr.net/npm/globe.gl@2.45.3/dist/globe.gl.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/topojson-client@3.1.0/dist/topojson-client.min.js"></script>
   <script src="js/countries.js"></script>
+  <script src="js/sfx.js"></script>
+  <script src="js/daynight.js"></script>
   <script src="js/app.js"></script>
 </body>
 </html>
