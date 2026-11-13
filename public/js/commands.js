@@ -46,7 +46,9 @@ window.CommandBar = (() => {
   const TOGGLES = { sats: 'sats', satellites: 'sats', satellite: 'sats', orbit: 'sats', night: 'night', 'day night': 'night', shading: 'night', hotspot: 'hot', hotspots: 'hot', hand: 'hands', hands: 'hands', gesture: 'hands', gestures: 'hands', camera: 'hands', webcam: 'hands' };
 
   function norm(t) {
-    return t.toLowerCase().replace(/[’']/g, "'").replace(/[^a-z0-9' -]/g, ' ').replace(/\s+/g, ' ').trim().replace(/^the /, '');
+    return t.toLowerCase().replace(/[’']/g, "'").replace(/[^a-z0-9'. -]/g, ' ')
+      .replace(/\.(?!\d)|(?<!\d)\./g, ' ') // keep the dot only inside numbers ("1.2 mt")
+      .replace(/\s+/g, ' ').trim().replace(/^the /, '');
   }
 
   // best country for a free-text name, or null
@@ -105,6 +107,31 @@ window.CommandBar = (() => {
     q => {
       const m = q.match(/^(?:time )?warp(?: (on|off))?$/);
       return m && { icon: '»', title: `Satellite time warp ${m[1] === 'off' ? 'off (live)' : m[1] === 'on' ? 'on (×60)' : 'on/off'}`, run: () => { api.warp(m[1] ? m[1] === 'on' : undefined); } };
+    },
+
+    // strike simulation: strike paris · nuke tokyo from moscow with 1.2 mt · simulate strike on london surface
+    q => {
+      const m = q.match(/^(?:simulate (?:an? )?(?:nuclear |missile )?strike(?: on)?|(?:nuclear |missile )?strike(?: sim(?:ulation)?)?(?: on)?|nuke|sim)(?: (.*))?$/);
+      if (!m) return null;
+      let rest = ` ${m[1] || ''} `, kt = null, burst = null, from = null;
+      const y = rest.match(/ (?:with |at |using |of )?(\d+(?:\.\d+)?) ?(kt|kilotons?|mt|megatons?|tons?|t)(?= )/);
+      if (y) {
+        const v = parseFloat(y[1]);
+        kt = /^m/.test(y[2]) ? v * 1000 : /^t/.test(y[2]) ? v / 1000 : v;
+        rest = rest.replace(y[0], ' ');
+      }
+      const b = rest.match(/ (surface|ground|air ?burst|air)(?: burst)?(?= )/);
+      if (b) { burst = /surface|ground/.test(b[1]) ? 'surface' : 'air'; rest = rest.replace(b[0], ' '); }
+      const f = rest.match(/ from (.+)$/);
+      if (f) { from = f[1].trim(); rest = rest.slice(0, f.index); }
+      const target = rest.trim().replace(/^(?:on|at) /, '') || null;
+      const extras = [kt != null && `${kt >= 1000 ? +(kt / 1000).toFixed(2) + ' MT' : +kt.toFixed(2) + ' KT'}`, burst && burst.toUpperCase()].filter(Boolean).join(' · ');
+      return {
+        icon: '☢',
+        title: target ? `Strike simulation · ${target}${from ? ` from ${from}` : ''}` : 'Open the strike simulation',
+        sub: extras || 'Flight path, blast zones and estimated casualties',
+        run: () => api.strike({ target, from, kt, burst }),
+      };
     },
 
     // who leads france / profile japan
@@ -225,6 +252,7 @@ window.CommandBar = (() => {
     <dt>who leads france</dt><dd>leaders, portraits and quick facts (also: profile japan)</dd>
     <dt>show nato</dt><dd>light up an alliance: eu · brics · g20 · g7 · opec · asean · au · gcc · sco · five eyes · quad · usmca · <i>clear bloc</i></dd>
     <dt>track iss</dt><dd>follow the space station · <i>warp</i> speeds satellites up ×60 · <i>stop tracking</i></dd>
+    <dt>strike paris from moscow</dt><dd>nuclear strike simulation, rough public estimates · add <i>with 1.2 mt</i> or <i>surface</i></dd>
     <dt>top 10 exporters</dt><dd>also: bottom 5 growth · richest 10 · largest 20 in 2000</dd>
     <dt>compare germany and france</dt><dd>side-by-side table, up to 4 countries</dd>
     <dt>play 2000 to 2020</dt><dd>animate the time slider · <i>year 1998</i> · <i>live</i></dd>
@@ -237,7 +265,7 @@ window.CommandBar = (() => {
   function suggest(text) {
     const q = norm(text);
     if (!q) {
-      return ['show nato', 'who leads france', 'track iss', 'top 10 exporters', 'play 2000 to 2020', 'compare germany and france', 'help']
+      return ['show nato', 'who leads france', 'track iss', 'strike paris from moscow', 'top 10 exporters', 'play 2000 to 2020', 'help']
         .map(ex => ({ icon: '›', title: ex, sub: 'Example', fill: ex }));
     }
     const res = [];

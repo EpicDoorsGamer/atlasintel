@@ -87,6 +87,16 @@
     yearCache: {},
     hotspots: [],         // news hotspots (last 24 h of GDELT events)
   };
+  // strike simulation (see "strike simulation" below; the maths is in strike.js)
+  const sim = {
+    open: false, picking: null,  // picking: 'launch' | 'target' while waiting for a globe click
+    launch: null, target: null,  // { lat, lng, name, country }
+    kt: 100, burst: 'air',
+    phase: 'setup',              // setup -> launch -> flight -> impact -> done
+    traj: null, fx: null, t: 0, t0: 0, dur: 0, dived: false,
+    impactAt: 0, result: null, map: null,
+    paths: [], rings: [],        // extra globe.gl paths / rings while the simulation runs
+  };
 
   // ------------------------------------------------------------ data
   // Economic data is pre-built into static JSON by build_data.py (refreshed daily by GitHub Actions).
@@ -385,6 +395,11 @@
     // a click that waited behind a busy frame no longer points where the user aimed: the globe
     // has moved since, so it would pick whatever country is under that spot now
     if (performance.now() - e.timeStamp > 500) return;
+    if (sim.picking) { // strike simulation: this click sets the launch site or the target
+      const wr = wrap.getBoundingClientRect(), g = globe.toGlobeCoords(e.clientX - wr.left, e.clientY - wr.top);
+      if (g) pickSimPoint(g);
+      return;
+    }
     activate(hitTest(e.clientX, e.clientY));
   });
   globeEl.addEventListener('pointermove', e => {
@@ -422,7 +437,11 @@
       .pathPointLat(p => p[1])
       .pathPointLng(p => p[0])
       .pathPointAlt(p => p[2] ?? 0.004)
-      .pathColor(d => d.pts ? ['rgba(255, 179, 0, 0.05)', 'rgba(255, 179, 0, 0.85)'] : 'rgba(200, 252, 255, 0.95)')
+      .pathColor(d => d.color || (d.pts ? ['rgba(255, 179, 0, 0.05)', 'rgba(255, 179, 0, 0.85)'] : 'rgba(200, 252, 255, 0.95)'))
+      .pathStroke(d => d.stroke ?? null) // strike-simulation arcs are drawn thicker
+      .pathDashLength(d => d.dash ?? 1)
+      .pathDashGap(d => d.gap ?? 0)
+      .pathDashAnimateTime(d => d.anim ?? 0)
       .pathTransitionDuration(0);
 
     // satellites: one particle cloud per group (a single draw call each)
@@ -443,11 +462,11 @@
     // pulse rings: the selected capital (cyan) + the biggest news hotspots (amber to red)
     globe
       .ringLat('lat').ringLng('lng')
-      .ringColor(d => d.sel ? (t => `rgba(0, 229, 255, ${1 - t})`) : (t => `rgba(${hotColour(d)}, ${(1 - t) * 0.85})`))
-      .ringMaxRadius(d => d.sel ? 4.5 : 0.8 + d.t * 3.2)
-      .ringPropagationSpeed(d => d.sel ? 2.6 : 0.9 + d.t * 1.6)
-      .ringRepeatPeriod(d => d.sel ? 850 : 2300 - d.t * 1400)
-      .ringAltitude(d => d.sel ? selAlt + 0.002 : 0.004);
+      .ringColor(d => d.sim ? (t => `rgba(${d.sim}, ${1 - t})`) : d.sel ? (t => `rgba(0, 229, 255, ${1 - t})`) : (t => `rgba(${hotColour(d)}, ${(1 - t) * 0.85})`))
+      .ringMaxRadius(d => d.sim ? d.max : d.sel ? 4.5 : 0.8 + d.t * 3.2)
+      .ringPropagationSpeed(d => d.sim ? d.speed : d.sel ? 2.6 : 0.9 + d.t * 1.6)
+      .ringRepeatPeriod(d => d.sim ? d.period : d.sel ? 850 : 2300 - d.t * 1400)
+      .ringAltitude(d => d.sim ? 0.003 : d.sel ? selAlt + 0.002 : 0.004);
 
     styleGlobe();
   }
@@ -579,7 +598,7 @@
       rings = polys.map(p => p[0]).filter(r => r.length > 6).sort((a, b) => b.length - a.length).slice(0, 14)
         .map(r => r.filter(([, lat]) => Math.abs(lat) < 89.9)); // no line down to the pole (Antarctica)
     }
-    globe.pathsData(satsOn && issOrbit ? rings.concat(issOrbit) : rings);
+    globe.pathsData(rings.concat(satsOn && issOrbit ? issOrbit : [], sim.paths));
   }
 
   // ------------------------------------------------------------ hover tooltip
@@ -740,7 +759,7 @@
     renderTab();
   }
 
-  function deselect() {
+  function deselect({ fly = true } = {}) {
     if (!state.selected) return;
     const c = state.selected;
     selectSeq++;
@@ -751,8 +770,8 @@
     lock.classList.remove('on');
     updateRings();
     styleGlobe();
-    globe.pointOfView({ lat: c.lat, lng: c.lng, altitude: 2.5 }, 1400);
-    setTimeout(() => { if (!state.selected) controls.autoRotate = true; }, 1500);
+    if (fly) globe.pointOfView({ lat: c.lat, lng: c.lng, altitude: 2.5 }, 1400);
+    setTimeout(() => { if (!state.selected && !sim.open) controls.autoRotate = true; }, 1500);
     history.replaceState(null, '', location.pathname);
   }
 
@@ -766,6 +785,7 @@
   function tick() {
     requestAnimationFrame(tick);
     frame++;
+    if (sim.open) simFrame(performance.now());
     const pov = globe.pointOfView();
     if (frame % 10 === 0) {
       $('hudPov').textContent = `LAT ${pov.lat.toFixed(1)} · LNG ${pov.lng.toFixed(1)} · ALT ${pov.altitude.toFixed(2)}`;
@@ -1223,7 +1243,7 @@
   addEventListener('keydown', e => {
     if (!body.classList.contains('engaged') || CommandBar.isOpen) return;
     const typing = /^(INPUT|TEXTAREA)$/.test(document.activeElement?.tagName);
-    if (e.key === 'Escape' && !typing) deselect();
+    if (e.key === 'Escape' && !typing) { if (sim.picking) stopPick(); else deselect(); }
     if (e.key === '/' && !typing) { e.preventDefault(); search.focus(); }
   });
   $('cmdBtn').addEventListener('click', () => CommandBar.open());
@@ -1381,7 +1401,7 @@
   function updateRings() {
     const data = hotOn ? state.hotspots.slice(0, 24) : [];
     if (state.selected) data.push({ sel: true, lat: state.selected.lat, lng: state.selected.lng });
-    globe.ringsData(data);
+    globe.ringsData(data.concat(sim.rings));
   }
   function hotspotsFor(c) {
     const list = state.hotspots.filter(h => h.country === c);
@@ -1402,9 +1422,11 @@
     set('night', nightOn);
     set('hot', hotOn);
     set('sats', satsOn);
+    set('sim', sim.open);
   }
   function setOption(k, on) {
     if (k === 'hands') return toggleHands(on);
+    if (k === 'sim') return (on ?? !sim.open) ? openSim() : closeSim();
     if (k === 'sats') return setSats(on ?? !satsOn);
     if (k === 'night') { nightOn = on ?? !nightOn; store.set('opt.night', nightOn); updateSky(); }
     if (k === 'hot') { hotOn = on ?? !hotOn; store.set('opt.hot', hotOn); updateHotspots(); }
@@ -1461,7 +1483,7 @@
     $('blocCard').hidden = true;
     schedulePaint();
     renderIndex();
-    if (!state.selected) setTimeout(() => { if (!state.selected && !state.bloc) controls.autoRotate = true; }, 1500);
+    if (!state.selected) setTimeout(() => { if (!state.selected && !state.bloc && !sim.open) controls.autoRotate = true; }, 1500);
   }
   function renderBlocCard() {
     const a = state.bloc, card = $('blocCard');
@@ -1817,6 +1839,550 @@
   }
 
   // ------------------------------------------------------------ command bar wiring
+  // ------------------------------------------------------------ strike simulation
+  // A movie-style ballistic strike: estimated flight path, blast zones and casualties.
+  // The physics is in strike.js (public effects scaling); this is the UI, camera and animation.
+  const YIELDS = [
+    { kt: 15, label: '15 KT', note: 'Hiroshima, 1945' },
+    { kt: 100, label: '100 KT', note: 'Typical modern warhead' },
+    { kt: 475, label: '475 KT', note: 'Large modern warhead' },
+    { kt: 1000, label: '1 MT', note: 'Cold War strategic warhead' },
+    { kt: 50000, label: '50 MT', note: 'Tsar Bomba, 1961 · the largest ever detonated' },
+  ];
+  const fmtKt = kt => kt < 1 ? `${Math.round(kt * 1000)} T` : kt < 1000 ? `${kt < 10 ? +kt.toFixed(1) : Math.round(kt)} KT` : `${+(kt / 1000).toFixed(kt < 10000 ? 2 : 0)} MT`;
+  const fmtKm = km => km < 1 ? `${Math.round(km * 1000)} M` : `${km < 10 ? km.toFixed(1) : Math.round(km).toLocaleString('en-US')} KM`;
+  const fmtArea = km2 => `${km2 < 10 ? km2.toFixed(1) : Math.round(km2).toLocaleString('en-US')} KM²`;
+  const mmss = min => `${String(Math.floor(min)).padStart(2, '0')}:${String(Math.floor((min % 1) * 60)).padStart(2, '0')}`;
+  const people = n => n >= 1e6 ? `${(n / 1e6).toFixed(n >= 1e7 ? 1 : 2)}M` : n >= 1e3 ? `${Math.round(n / 1e3).toLocaleString('en-US')}K` : `${Math.round(n)}`;
+  let citiesReq = null;
+  const getCities = () => (citiesReq ||= getJSON('api/cities.json').then(d => d.cities).catch(e => { citiesReq = null; throw e; }));
+  const countryName = code => byIso3.get(code)?.name || code || '';
+
+  function openSim() {
+    if (!body.classList.contains('engaged')) return;
+    sim.open = true;
+    controls.autoRotate = false;
+    body.classList.add('sim');
+    $('simPanel').hidden = false;
+    holoIn(['#simPanel']);
+    renderToggles();
+    getCities().catch(() => toast('CITY DATA UNAVAILABLE · CASUALTY ESTIMATES DISABLED'));
+    loadGlobal('SP.POP.TOTL').catch(() => {});
+    renderSimSetup();
+    if (!sim.target) startPick('target');
+  }
+  function closeSim() {
+    sim.open = false;
+    stopPick();
+    resetStrike();
+    sim.paths = [];
+    updatePaths();
+    body.classList.remove('sim');
+    $('simPanel').hidden = true;
+    $('strikeSvg').innerHTML = '';
+    renderToggles();
+    setTimeout(() => { if (!sim.open && !state.selected && !state.bloc) controls.autoRotate = true; }, 1500);
+  }
+  // back to the set-up stage, keeping launch site, target and yield
+  function resetStrike() {
+    sim.phase = 'setup';
+    sim.traj = null; sim.result = null; sim.map = null; sim.t = 0;
+    sim.rings = [];
+    updateRings();
+    $('strikeMap').hidden = true;
+    $('strikeAlert').hidden = true;
+    $('simGo').disabled = false;
+    $('simGo').textContent = '▲ LAUNCH';
+    previewPath();
+    renderSimSetup();
+  }
+
+  function startPick(kind) {
+    sim.picking = kind;
+    body.classList.add('picking');
+    document.querySelectorAll('.sim-pick').forEach(b => b.classList.toggle('on', b.dataset.pick === kind));
+    toast(`CLICK THE GLOBE TO SET THE ${kind === 'launch' ? 'LAUNCH SITE' : 'TARGET'} · ESC TO CANCEL`);
+  }
+  function stopPick() {
+    sim.picking = null;
+    body.classList.remove('picking');
+    document.querySelectorAll('.sim-pick').forEach(b => b.classList.remove('on'));
+  }
+  async function pickSimPoint(g) {
+    const kind = sim.picking;
+    let cities = null;
+    try { cities = await getCities(); } catch { /* name it by coordinates */ }
+    const city = cities && Strike.nearestCity(g, cities, 40);
+    // a click is ~10-30 km wide at globe scale: near a city means that city (big ones from further)
+    const snap = city && city.km < 10 + 8 * Math.log10(Math.max(1e5, city.pop) / 1e5);
+    const p = snap ? { lat: city.lat, lng: city.lng } : g;
+    const f = featureAt(p.lat, p.lng);
+    const where = f ? (f.country?.name || f.properties.name || '') : 'OPEN OCEAN';
+    const name = snap ? city.name : city ? `${Math.round(city.km)} KM FROM ${city.name}`
+      : `${Math.abs(g.lat).toFixed(2)}°${g.lat < 0 ? 'S' : 'N'} ${Math.abs(g.lng).toFixed(2)}°${g.lng < 0 ? 'W' : 'E'}`;
+    setSimPoint(kind, { lat: p.lat, lng: p.lng, name, country: where });
+    if (kind === 'target' && !sim.launch) startPick('launch');
+    else stopPick();
+  }
+  function setSimPoint(kind, p) {
+    if (sim.phase !== 'setup' && sim.phase !== 'done') return;
+    if (sim.phase === 'done') resetStrike();
+    sim[kind] = p;
+    $(kind === 'launch' ? 'simFrom' : 'simTo').value = `${p.name}${p.country && p.country !== p.name ? ` · ${p.country}` : ''}`.toUpperCase();
+    previewPath();
+    renderSimSetup();
+  }
+
+  // dashed "estimated target path" before launch
+  function previewPath() {
+    sim.paths = [];
+    if (sim.launch && sim.target && sim.phase === 'setup') {
+      const tr = Strike.trajectory(sim.launch, sim.target, 160);
+      sim.paths = [{ pts: tr.pts.map(p => [p.lng, p.lat, p.alt / Strike.R_EARTH]), color: 'rgba(255, 70, 70, 0.85)', stroke: 1.6, dash: 0.02, gap: 0.012, anim: 3500 }];
+    }
+    updatePaths();
+  }
+
+  // city / country search for the launch and target fields
+  const fold = s => s.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase(); // "Ōsaka" -> "osaka"
+  const cityKey = c => (c.key ||= fold(c[0]));
+  function simSearch(text, cities) {
+    const q = fold(text.trim());
+    if (q.length < 2) return [];
+    const out = [];
+    for (const c of cities) { // sorted by population, so the biggest match comes first
+      if (cityKey(c).startsWith(q)) out.push({ name: c[0], country: countryName(c[1]), lat: c[2], lng: c[3], pop: c[4] });
+      if (out.length >= 6) break;
+    }
+    for (const c of COUNTRIES) {
+      if (out.length >= 7) break;
+      if (fold(c.name).startsWith(q) && c.lat != null) out.push({ name: c.capital || c.name, country: c.name, lat: c.lat, lng: c.lng, capital: true });
+    }
+    return out;
+  }
+  function bindSimField(kind, input, ac) {
+    let items = [], act = 0;
+    const draw = () => {
+      ac.innerHTML = items.map((it, i) => `<li data-i="${i}" class="${i === act ? 'on' : ''}">${esc(it.name)}<span>${esc(it.country)}${it.pop ? ` · ${people(it.pop)}` : it.capital ? ' · CAPITAL' : ''}</span></li>`).join('');
+      ac.classList.toggle('open', items.length > 0);
+    };
+    const choose = it => {
+      if (!it) return;
+      setSimPoint(kind, { lat: it.lat, lng: it.lng, name: it.name, country: it.country });
+      ac.classList.remove('open');
+      input.blur();
+      if (kind === 'target' && !sim.launch) $('simFrom').focus();
+    };
+    input.addEventListener('focus', () => { if (sim.picking) stopPick(); input.select(); });
+    input.addEventListener('input', async () => {
+      let cities = [];
+      try { cities = await getCities(); } catch { /* countries only */ }
+      items = simSearch(input.value, cities);
+      act = 0;
+      draw();
+    });
+    input.addEventListener('keydown', e => {
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        act = (act + (e.key === 'ArrowDown' ? 1 : -1) + items.length) % (items.length || 1);
+        draw();
+      } else if (e.key === 'Enter') { e.preventDefault(); choose(items[act]); }
+      else if (e.key === 'Escape') { input.blur(); }
+    });
+    ac.addEventListener('mousedown', e => {
+      const li = e.target.closest('li[data-i]');
+      if (li) { e.preventDefault(); choose(items[+li.dataset.i]); }
+    });
+    input.addEventListener('blur', () => setTimeout(() => ac.classList.remove('open'), 150));
+  }
+  bindSimField('launch', $('simFrom'), $('simFromAc'));
+  bindSimField('target', $('simTo'), $('simToAc'));
+  document.querySelectorAll('.sim-pick').forEach(b => { b.onclick = () => (sim.picking === b.dataset.pick ? stopPick() : startPick(b.dataset.pick)); });
+
+  function setSimYield(kt, fromSlider = false) {
+    sim.kt = Math.max(0.1, Math.min(100000, kt));
+    if (!fromSlider) $('simYield').value = Math.log10(sim.kt);
+    $('simYieldVal').textContent = fmtKt(sim.kt);
+    const preset = YIELDS.find(y => Math.abs(y.kt - sim.kt) / y.kt < 0.03);
+    $('simYieldNote').textContent = preset ? preset.note : '';
+    for (const b of $('simPresets').children) b.classList.toggle('on', b === [...$('simPresets').children][YIELDS.indexOf(preset)]);
+    if (sim.phase === 'done') resetStrike(); else renderSimSetup();
+  }
+  $('simPresets').innerHTML = YIELDS.map(y => `<button data-kt="${y.kt}" title="${esc(y.note)}">${y.label}</button>`).join('');
+  $('simPresets').addEventListener('click', e => { const b = e.target.closest('button'); if (b) setSimYield(+b.dataset.kt); });
+  $('simYield').addEventListener('input', e => {
+    const v = 10 ** +e.target.value; // round to 2 significant figures
+    const p = 10 ** Math.floor(Math.log10(v) - 1);
+    setSimYield(Math.round(v / p) * p, true);
+  });
+  $('simBurst').addEventListener('click', e => {
+    const b = e.target.closest('button');
+    if (!b) return;
+    sim.burst = b.dataset.burst;
+    for (const x of $('simBurst').children) x.classList.toggle('on', x === b);
+    if (sim.phase === 'done') resetStrike(); else renderSimSetup();
+  });
+  $('simGo').onclick = () => (sim.phase === 'done' ? (resetStrike(), launchStrike()) : launchStrike());
+  $('simClose').onclick = closeSim;
+  setSimYield(sim.kt);
+
+  // before launch: what the effects would be, and the flight estimate
+  function renderSimSetup() {
+    if (sim.phase !== 'setup') return;
+    const fx = Strike.effects(sim.kt, sim.burst);
+    const tr = sim.launch && sim.target ? Strike.trajectory(sim.launch, sim.target, 16) : null;
+    $('simOut').innerHTML = `
+      ${tr ? `<div class="sec-title">ESTIMATED TARGET PATH</div>
+        <div class="sim-tele">
+          <div><span>CLASS</span><b>${tr.cls}</b></div><div><span>RANGE</span><b>${fmtKm(tr.km)}</b></div>
+          <div><span>APOGEE</span><b>${fmtKm(tr.apogee)}</b></div><div><span>FLIGHT TIME</span><b>${mmss(tr.minutes)}</b></div>
+        </div>` : `<div class="sim-hint">${!sim.target ? 'SET A TARGET' : 'SET A LAUNCH SITE'} · TYPE A CITY OR PRESS ⌖ AND CLICK THE GLOBE</div>`}
+      <div class="sec-title">PREDICTED EFFECT RADII <span class="yr">${fmtKt(sim.kt)} · ${sim.burst === 'air' ? 'AIRBURST' : 'SURFACE BURST'}</span></div>
+      ${zoneList(fx)}`;
+    $('simGo').disabled = !(sim.launch && sim.target);
+  }
+  function zoneList(fx) {
+    return `<ul class="sim-zones">${fx.zones.map(z => `<li title="${esc(z.note)}">
+      <i style="background:rgba(${z.color},.55);border-color:rgb(${z.color})"></i>
+      <span class="zl">${z.label}</span><b>${fmtKm(z.r)}</b><small>${fmtArea(Math.PI * z.r * z.r)} · ${esc(z.note)}</small></li>`).join('')}</ul>`;
+  }
+
+  function showAlert(html, kind) {
+    const a = $('strikeAlert');
+    a.innerHTML = html;
+    a.className = kind;
+    a.hidden = false;
+  }
+
+  function launchStrike() {
+    if (!sim.launch || !sim.target) return toast('SET A LAUNCH SITE AND A TARGET FIRST');
+    if (sim.phase !== 'setup') return;
+    stopPick();
+    deselect({ fly: false });
+    stopTracking();
+    clearBloc();
+    controls.autoRotate = false;
+    sim.traj = Strike.trajectory(sim.launch, sim.target);
+    sim.fx = Strike.effects(sim.kt, sim.burst);
+    sim.phase = 'launch';
+    sim.t = 0;
+    sim.dived = false;
+    sim.dur = Math.min(12, 6 + sim.traj.km / 2500) * 1000; // the real flight time, compressed
+    const mid = sim.traj.at(0.5);
+    globe.pointOfView({ lat: mid.lat, lng: normLng(mid.lng), altitude: Math.max(0.9, Math.min(2.6, 0.6 + sim.traj.km / 5000)) }, 1300);
+    sim.rings = [
+      { sim: '255, 60, 60', lat: sim.launch.lat, lng: sim.launch.lng, max: 2.2, speed: 2.5, period: 650 },
+      { sim: '255, 60, 60', lat: sim.target.lat, lng: sim.target.lng, max: 1.6, speed: 1.4, period: 1100 },
+    ];
+    updateRings();
+    setSimPaths();
+    $('simGo').disabled = true;
+    $('simGo').textContent = 'IN FLIGHT…';
+    showAlert(`<b>⚠ BALLISTIC MISSILE LAUNCH DETECTED</b><span>${sim.traj.cls} · ${esc(sim.launch.name.toUpperCase())} → ${esc(sim.target.name.toUpperCase())}</span><span id="saClock">IMPACT IN ${mmss(sim.traj.minutes)}</span>`, 'warn');
+    renderTelemetry();
+    setTimeout(() => {
+      if (sim.phase !== 'launch') return;
+      sim.phase = 'flight';
+      sim.t0 = performance.now();
+    }, 1400);
+  }
+
+  // the arc: faint predicted path + bright trail behind the warhead
+  function setSimPaths() {
+    const tr = sim.traj;
+    if (!tr) return;
+    const n = Math.max(2, Math.ceil(sim.t * (tr.pts.length - 1)) + 1);
+    const flown = tr.pts.slice(0, n).map(p => [p.lng, p.lat, p.alt / Strike.R_EARTH]);
+    const head = tr.at(sim.t);
+    flown.push([head.lng, head.lat, head.alt / Strike.R_EARTH]);
+    sim.paths = [
+      { pts: tr.pts.map(p => [p.lng, p.lat, p.alt / Strike.R_EARTH]), color: 'rgba(255, 70, 70, 0.6)', stroke: 1.2, dash: 0.015, gap: 0.012, anim: 4000 },
+      { pts: flown, color: ['rgba(255, 120, 60, 0.2)', 'rgba(255, 220, 170, 1)'], stroke: 3.2 },
+    ];
+    updatePaths();
+  }
+
+  function renderTelemetry() {
+    const tr = sim.traj, t = sim.t, head = tr.at(t);
+    const left = tr.minutes * (1 - t);
+    $('simOut').innerHTML = `
+      <div class="sec-title">TELEMETRY <span class="yr">${tr.cls} · ${fmtKt(sim.kt)}</span></div>
+      <div class="sim-tele live">
+        <div><span>T+</span><b>${mmss(tr.minutes * t)}</b></div><div><span>IMPACT IN</span><b class="red">${mmss(left)}</b></div>
+        <div><span>ALTITUDE</span><b>${fmtKm(head.alt)}</b></div><div><span>VELOCITY</span><b>${tr.speed(t).toFixed(1)} KM/S</b></div>
+        <div><span>RANGE</span><b>${fmtKm(tr.km)}</b></div><div><span>APOGEE</span><b>${fmtKm(tr.apogee)}</b></div>
+      </div>
+      <div class="sim-bar"><i style="width:${(t * 100).toFixed(1)}%"></i></div>`;
+    const clock = $('saClock');
+    if (clock) clock.textContent = `IMPACT IN ${mmss(left)}`;
+  }
+
+  // per frame while the simulation is open
+  function simFrame(now) {
+    if (sim.phase === 'flight') {
+      const t = sim.t = Math.min(1, (now - sim.t0) / sim.dur);
+      if (frame % 2 === 0) setSimPaths();
+      if (frame % 6 === 0) renderTelemetry();
+      if (!sim.dived && t > 0.7) { // the camera dives onto the target for the last seconds
+        sim.dived = true;
+        globe.pointOfView({ lat: sim.target.lat, lng: sim.target.lng, altitude: 0.42 }, Math.max(400, (1 - t) * sim.dur + 300));
+      }
+      if (t >= 1) detonate();
+    }
+    if (sim.map && !sim.map.settled) drawTactical(now);
+    drawSimOverlay(now);
+  }
+
+  // markers over the globe: launch site, target reticle, warhead, ground-zero glow
+  function drawSimOverlay(now) {
+    const pov = globe.pointOfView(), wr = wrap.getBoundingClientRect();
+    const horizon = Math.acos(1 / (1 + pov.altitude));
+    const proj = (lat, lng, altKm = 0) => {
+      const a = altKm / Strike.R_EARTH;
+      if (angularDistance(pov, { lat, lng }) * Math.PI / 180 > horizon + Math.acos(1 / (1 + a)) - 0.005) return null;
+      const p = globe.getScreenCoords(lat, lng, a);
+      return Number.isFinite(p.x) ? { x: (p.x + wr.left).toFixed(1), y: (p.y + wr.top).toFixed(1) } : null;
+    };
+    let html = '';
+    const L = sim.launch && proj(sim.launch.lat, sim.launch.lng);
+    if (L) html += `<g class="sv-launch" transform="translate(${L.x},${L.y})"><path d="M0,-8 L7,5 L-7,5 Z"/><text x="10" y="19">LAUNCH ·${esc(sim.launch.name.toUpperCase())}</text></g>`;
+    const T = sim.target && proj(sim.target.lat, sim.target.lng);
+    if (T && sim.phase !== 'impact' && sim.phase !== 'done') {
+      html += `<g class="sv-target" transform="translate(${T.x},${T.y})"><g class="spin"><circle r="11"/><path d="M-18,0H-7M7,0H18M0,-18V-7M0,7V18"/></g><text x="16" y="-12">TARGET · ${esc(sim.target.name.toUpperCase())}</text></g>`;
+    }
+    if (sim.phase === 'flight' || sim.phase === 'launch') {
+      const h = sim.traj.at(sim.t), H = proj(h.lat, h.lng, h.alt);
+      if (H) html += `<g class="sv-head" transform="translate(${H.x},${H.y})"><circle class="halo" r="10"/><circle r="3.4"/><text x="12" y="-9">RV-1 · ${sim.traj.speed(sim.t).toFixed(1)} KM/S · ${fmtKm(h.alt)}</text></g>`;
+    }
+    if ((sim.phase === 'impact' || sim.phase === 'done') && T) {
+      const age = (now - sim.impactAt) / 1000;
+      const r = 6 + Math.min(1, age / 1.2) * 26, o = Math.max(0.35, 1 - age / 2.5);
+      html += `<g class="sv-gz" transform="translate(${T.x},${T.y})"><circle class="glow" r="${r.toFixed(1)}" style="opacity:${o.toFixed(2)}"/><circle r="4"/><text x="14" y="-12">GROUND ZERO · ${esc(sim.target.name.toUpperCase())}</text></g>`;
+    }
+    $('strikeSvg').innerHTML = html;
+  }
+
+  async function detonate() {
+    const gz = sim.target, fx = sim.fx;
+    sim.phase = 'impact';
+    sim.t = 1;
+    sim.impactAt = performance.now();
+    setSimPaths();
+    // flash centred on ground zero, then a visual shock ring on the globe (not to scale)
+    const wr = wrap.getBoundingClientRect(), p = globe.getScreenCoords(gz.lat, gz.lng, 0);
+    const flash = $('strikeFlash');
+    flash.style.setProperty('--x', `${p.x + wr.left}px`);
+    flash.style.setProperty('--y', `${p.y + wr.top}px`);
+    flash.classList.remove('go'); void flash.offsetWidth; flash.classList.add('go');
+    wrap.classList.remove('shake'); void wrap.offsetWidth; wrap.classList.add('shake');
+    sim.rings = [
+      { sim: '255, 240, 210', lat: gz.lat, lng: gz.lng, max: 7, speed: 7, period: 60000 },
+      { sim: '255, 110, 40', lat: gz.lat, lng: gz.lng, max: 4, speed: 2.6, period: 60000 },
+    ];
+    updateRings();
+    setTimeout(() => { if (sim.phase === 'impact' || sim.phase === 'done') { sim.rings = []; updateRings(); } }, 2800);
+    showAlert(`<b>☢ DETONATION</b><span>${esc(gz.name.toUpperCase())} · ${fmtKt(sim.kt)} ${sim.burst === 'air' ? 'AIRBURST' : 'SURFACE BURST'}</span><span>T+${mmss(sim.traj.minutes)}</span>`, 'det');
+    let cities = [];
+    try { cities = await getCities(); } catch { /* estimate without cities */ }
+    openTactical(cities);
+    renderSimResults(null);
+    try {
+      await loadGlobal('SP.POP.TOTL').catch(() => {});
+      sim.result = Strike.casualties(gz, fx, cities, ruralDensity(cities));
+    } catch { sim.result = null; }
+    if (sim.phase !== 'impact') return; // closed or reset meanwhile
+    sim.phase = 'done';
+    renderSimResults(sim.result);
+    $('simGo').disabled = false;
+    $('simGo').textContent = '▲ LAUNCH AGAIN';
+  }
+
+  // people per km² outside the cities: the country's population minus its cities, spread evenly
+  function featureAreaKm2(f) {
+    if (f.areaKm2) return f.areaKm2;
+    const polys = f.geometry.type === 'Polygon' ? [f.geometry.coordinates] : f.geometry.coordinates;
+    let total = 0;
+    for (const p of polys) p.forEach((ring, i) => { // sinusoidal (equal-area) projection + shoelace
+      let s = 0;
+      for (let k = 0, j = ring.length - 1; k < ring.length; j = k++) {
+        const xj = ring[j][0] * Math.cos(ring[j][1] * Math.PI / 180), xk = ring[k][0] * Math.cos(ring[k][1] * Math.PI / 180);
+        s += (xj - xk) * (ring[j][1] + ring[k][1]);
+      }
+      total += (i ? -1 : 1) * Math.abs(s / 2);
+    });
+    return (f.areaKm2 = Math.abs(total) * 111.32 * 110.57);
+  }
+  function ruralDensity(cities) {
+    const cityPop = new Map(), cache = new Map();
+    for (const c of cities) cityPop.set(c[1], (cityPop.get(c[1]) || 0) + c[4]);
+    return (lat, lng) => {
+      const f = featureAt(lat, normLng(lng));
+      if (!f) return null; // sea
+      if (!cache.has(f)) {
+        const iso = f.country?.iso3, pop = iso && latestVal('SP.POP.TOTL', iso), area = featureAreaKm2(f);
+        let d = f.country?.joke ? 0 : 5; // Antarctica: penguins only; other territories: sparse
+        if (pop && area > 0) d = Math.max(0.15 * pop / area, (pop - 0.8 * (cityPop.get(iso) || 0)) / area);
+        cache.set(f, d);
+      }
+      return cache.get(f);
+    };
+  }
+
+  // ground zero at true scale: coastlines, cities, range rings and the effect zones
+  function openTactical(cities) {
+    const gz = sim.target, fx = sim.fx;
+    const view = Math.max(fx.r.psi1, fx.r.thermal3) * 1.3; // km from centre to the edge of the scope
+    const kx = 111.32 * Math.cos(gz.lat * Math.PI / 180), ky = 110.57;
+    const X = lng => ((lng + 360 * Math.round((gz.lng - lng) / 360) - gz.lng) * kx / view);
+    const Y = lat => (-(lat - gz.lat) * ky / view);
+    const dLat = 1.4 * view / ky, dLng = 1.4 * view / kx;
+    let land = '';
+    for (const f of features) {
+      const b = f.bbox;
+      if (!b || b[1] > gz.lat + dLat || b[3] < gz.lat - dLat) continue;
+      if (![0, 360, -360].some(s => b[0] + s <= gz.lng + dLng && b[2] + s >= gz.lng - dLng)) continue;
+      const polys = f.geometry.type === 'Polygon' ? [f.geometry.coordinates] : f.geometry.coordinates;
+      for (const poly of polys) for (const ring of poly) {
+        let d = '', px = null;
+        for (const [lng, lat] of ring) {
+          const x = X(lng), y = Y(lat);
+          d += `${px === null || Math.abs(x - px) > 4 ? 'M' : 'L'}${x.toFixed(4)},${y.toFixed(4)}`;
+          px = x;
+        }
+        land += d + 'Z';
+      }
+    }
+    // the biggest cities inside the scope
+    const near = cities.filter(c => {
+      if (Math.abs(c[2] - gz.lat) > dLat) return false;
+      const d = Math.hypot(X(c[3]), Y(c[2]));
+      return d < 1.02 && d > 0.06; // the target itself is named in the footer
+    }).slice(0, 16);
+    const cityMarks = near.map(c => {
+      const x = X(c[3]), y = Y(c[2]), r = 0.008 + Math.log10(Math.max(1e4, c[4]) / 1e4) * 0.006;
+      return `<g class="sm-city"><circle cx="${x.toFixed(4)}" cy="${y.toFixed(4)}" r="${r.toFixed(4)}"/><text x="${(x + r + 0.012).toFixed(4)}" y="${(y + 0.012).toFixed(4)}">${esc(c[0].toUpperCase())}</text></g>`;
+    }).join('');
+    // range rings at a round number of km
+    const step = [0.1, 0.25, 0.5, 1, 2, 2.5, 5, 10, 20, 25, 50, 100, 200, 500].find(s => view / s <= 4.2) || 1000;
+    let grid = '';
+    for (let k = step; k < view; k += step) {
+      const r = k / view;
+      grid += `<circle class="sm-ring" r="${r.toFixed(4)}"/><text class="sm-rl" x="${(r * 0.707 + 0.01).toFixed(4)}" y="${(-r * 0.707 - 0.01).toFixed(4)}">${fmtKm(k)}</text>`;
+    }
+    const zones = fx.zones.map((z, i) => `<circle class="sm-zone" data-i="${i}" r="0" style="fill:rgba(${z.color},${z.id === 'fireball' ? 0.75 : 0.16});stroke:rgb(${z.color})"/>`).join('');
+    // callouts: a column of labels on the right, each with a leader line to its ring
+    const labels = fx.zones.map((z, i) => {
+      const r = z.r / view, ly = -0.34 + i * 0.13, lx = 0.56;
+      const ry = Math.max(-r, Math.min(r, ly)) * 0.92, rx = Math.sqrt(Math.max(0, r * r - ry * ry));
+      return `<g class="sm-zl" data-i="${i}" style="fill:rgb(${z.color});stroke:rgb(${z.color})">
+        <path class="sm-lead" d="M${rx.toFixed(4)},${ry.toFixed(4)}L${(lx - 0.03).toFixed(4)},${ly.toFixed(4)}H${lx.toFixed(4)}"/>
+        <circle cx="${rx.toFixed(4)}" cy="${ry.toFixed(4)}" r="0.007"/>
+        <text x="${(lx + 0.012).toFixed(4)}" y="${(ly + 0.012).toFixed(4)}">${z.short} · ${fmtKm(z.r)}</text>
+      </g>`;
+    }).join('');
+    $('smSvg').innerHTML = `
+      <defs>
+        <clipPath id="smClip"><circle r="1"/></clipPath>
+        <radialGradient id="smSweepG" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="rgba(0,229,255,0)"/><stop offset="1" stop-color="rgba(0,229,255,.22)"/></radialGradient>
+      </defs>
+      <circle class="sm-bg" r="1"/>
+      <g clip-path="url(#smClip)">
+        <path class="sm-land" d="${land}"/>
+        ${grid}
+        <path class="sm-cross" d="M-1,0H1M0,-1V1"/>
+        ${zones}
+        <circle class="sm-shock" r="0"/>
+        ${cityMarks}
+        <g class="sm-sweep"><path d="M0,0 L1,0 A1,1 0 0,0 0.866,-0.5 Z" fill="url(#smSweepG)"/></g>
+        ${labels}
+      </g>
+      <circle class="sm-edge" r="1"/>`;
+    $('smCoords').textContent = `${Math.abs(gz.lat).toFixed(3)}°${gz.lat < 0 ? 'S' : 'N'} ${Math.abs(normLng(gz.lng)).toFixed(3)}°${normLng(gz.lng) < 0 ? 'W' : 'E'}`;
+    $('smFoot').innerHTML = `<span>${esc(gz.name.toUpperCase())}${gz.country && gz.country !== gz.name ? ` · ${esc(gz.country.toUpperCase())}` : ''}</span><span>RINGS EVERY ${fmtKm(step)}</span>`;
+    sim.map = { view, start: performance.now(), settled: false };
+    $('strikeMap').hidden = false;
+    holoIn(['#strikeMap']);
+  }
+  // zones grow out from ground zero, the fireball first, the 1 psi ring last; then the shock front fades
+  function drawTactical(now) {
+    const m = sim.map, t = (now - m.start) / 1000;
+    const svg = $('smSvg');
+    const ease = x => 1 - (1 - Math.max(0, Math.min(1, x))) ** 3;
+    sim.fx.zones.forEach((z, i) => {
+      const order = sim.fx.zones.length - 1 - i; // smallest (drawn last) grows first
+      const grow = ease((t - order * 0.18) / (0.5 + z.r / m.view * 1.4));
+      const el = svg.querySelector(`.sm-zone[data-i="${i}"]`);
+      if (el) el.setAttribute('r', (z.r / m.view * grow).toFixed(4));
+      const lb = svg.querySelector(`.sm-zl[data-i="${i}"]`);
+      if (lb) lb.style.opacity = grow > 0.98 ? 1 : 0;
+    });
+    const shock = svg.querySelector('.sm-shock');
+    if (shock) {
+      const s = Math.min(1, t / 2.6);
+      shock.setAttribute('r', (s * sim.fx.r.psi1 / m.view * 1.12).toFixed(4));
+      shock.style.opacity = (1 - s).toFixed(2);
+    }
+    if (t > 3.2) m.settled = true;
+  }
+
+  function renderSimResults(res) {
+    const fx = sim.fx;
+    const tile = (k, v, cls, sub) => `<div class="tile ${cls}"><div class="k">${k}</div><div class="v" data-count="${v ?? ''}">${v == null ? '…' : '0'}</div><div class="y">${sub}</div></div>`;
+    $('simOut').innerHTML = `
+      <div class="sec-title">ESTIMATED CASUALTIES <span class="yr">${res ? 'NO WARNING · NO SHELTER' : 'COMPUTING…'}</span></div>
+      <div class="tiles sim-cas">
+        ${tile('FATALITIES', res && Math.round(res.killed), 'red', 'killed outright or within days')}
+        ${tile('INJURIES', res && Math.round(res.injured), 'amber', 'burns, blast and radiation')}
+        ${tile('IN 1 PSI RADIUS', res && Math.round(res.exposed), '', 'people inside the outer ring')}
+      </div>
+      <div class="sec-title">EFFECT ZONES <span class="yr">${fmtKt(sim.kt)} · ${sim.burst === 'air' ? 'AIRBURST' : 'SURFACE BURST'}</span></div>
+      ${zoneList(fx)}
+      ${sim.burst === 'surface' ? '<div class="sim-hint warn">SURFACE BURST · HEAVY RADIOACTIVE FALLOUT DOWNWIND, NOT MODELLED HERE</div>' : ''}
+      <div class="sim-hint">ORDER-OF-MAGNITUDE ESTIMATE · FLIGHT ${fmtKm(sim.traj.km)} IN ${mmss(sim.traj.minutes)} (${sim.traj.cls})</div>`;
+    // count the numbers up
+    const els = [...$('simOut').querySelectorAll('[data-count]')].filter(e => e.dataset.count !== '');
+    const t0 = performance.now();
+    (function step() {
+      const k = Math.min(1, (performance.now() - t0) / 1600), e = 1 - (1 - k) ** 3;
+      els.forEach(el => { el.textContent = people(+el.dataset.count * e); });
+      if (k < 1 && els.length && els[0].isConnected) requestAnimationFrame(step);
+    })();
+  }
+
+  // "strike paris from moscow with 1 mt": open the simulation with the fields filled in
+  async function strikeCommand({ target, from, kt, burst }) {
+    openSim();
+    if (!sim.open) return '';
+    if (sim.phase !== 'setup' && sim.phase !== 'done') return '<div class="cmd-empty">A STRIKE IS ALREADY IN FLIGHT</div>';
+    if (sim.phase === 'done') resetStrike();
+    let cities = [];
+    try { cities = await getCities(); } catch { /* countries only */ }
+    const find = text => {
+      const q = fold(text);
+      const exact = cities.find(c => cityKey(c) === q);
+      const country = COUNTRIES.find(c => fold(c.name) === q) || (q.length > 3 && COUNTRIES.find(c => fold(c.name).startsWith(q)));
+      if (exact) return { name: exact[0], country: countryName(exact[1]), lat: exact[2], lng: exact[3] };
+      if (country && country.lat != null) return { name: country.capital || country.name, country: country.name, lat: country.lat, lng: country.lng };
+      const it = simSearch(text, cities)[0];
+      return it ? { name: it.name, country: it.country, lat: it.lat, lng: it.lng } : null;
+    };
+    if (kt) setSimYield(kt);
+    if (burst) { sim.burst = burst; for (const x of $('simBurst').children) x.classList.toggle('on', x.dataset.burst === burst); }
+    const missing = [];
+    for (const [kind, text] of [['target', target], ['launch', from]]) {
+      if (!text) continue;
+      const p = find(text);
+      if (p) setSimPoint(kind, p); else missing.push(text);
+    }
+    if (missing.length) return `<div class="cmd-empty">NO CITY OR COUNTRY CALLED "${esc(missing.join('", "').toUpperCase())}"</div>`;
+    stopPick();
+    if (!sim.target) startPick('target');
+    else if (!sim.launch) startPick('launch');
+    else globe.pointOfView({ lat: sim.target.lat, lng: sim.target.lng, altitude: 1.6 }, 1200);
+    renderSimSetup();
+    return '';
+  }
+
   CommandBar.init({
     countries: COUNTRIES.concat(ANTARCTICA),
     byIso3: iso => byIso3.get(iso),
@@ -1849,6 +2415,7 @@
     },
     stopTracking: () => stopTracking(),
     warp: on => setWarp(on ?? Satellites.speed === 1),
+    strike: opts => strikeCommand(opts),
     watch(c) {
       state.watch.has(c.iso3) ? state.watch.delete(c.iso3) : state.watch.add(c.iso3);
       store.set('watch', [...state.watch]);

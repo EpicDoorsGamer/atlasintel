@@ -41,6 +41,12 @@ It is a fully **static site**, so it can be hosted for free on Cloudflare Pages.
   - **Hover** a dot for its name, altitude and speed. **Click** it to follow it with the camera.
   - **TRACK ISS** follows the space station and draws its orbit for the next 95 minutes.
   - **WARP ×60** speeds time up so you can see them move.
+- **Strike simulation (STRIKE SIM, or `strike paris from moscow`):** a movie-style, educational nuclear-strike simulator.
+  - Pick a launch site and a target: type a city, or press ⌖ and click the globe. Choose a yield (15 kt Hiroshima to 50 Mt Tsar Bomba) and an airburst or surface burst.
+  - **LAUNCH** plays the flight: the estimated target path, a launch alert with countdown, live telemetry (missile class, range, apogee, altitude, velocity) and a camera dive onto the target.
+  - At detonation: a flash and shock wave, then a true-scale **tactical assessment** of ground zero with the effect zones (fireball, 12 psi, 500 rem radiation, 5 psi, third-degree burns, 1 psi), plus estimated fatalities, injuries and the population inside the outer ring.
+  - In the command bar, add a yield or burst type: `nuke tokyo from beijing with 1.2 mt surface`.
+  - The numbers are rough, order-of-magnitude estimates from public sources: effect radii from Glasstone & Dolan, *The Effects of Nuclear Weapons* (1977); casualty rates from the US Office of Technology Assessment, *The Effects of Nuclear War* (1979); population from Natural Earth city populations plus each country's average density. Fallout is not modelled.
 - **Antarctica (a joke):** click it, find it at the bottom of the nations index, or type `who leads antarctica`. It isn't a country, so it stays out of every ranking and total, but its dossier has a leader: Emperor Penguin I. The News and Archive tabs are real.
 - **Toggles:** top right: **HANDS**, **NIGHT**, **HOTSPOTS** and **SATS**. Your choices are remembered in your browser.
 
@@ -58,6 +64,7 @@ It is a fully **static site**, so it can be hosted for free on Cloudflare Pages.
 | Night lights | NASA "Black Marble" image (via the three-globe package on jsDelivr), blended in the browser. |
 | Leaders & facts | `public/api/facts.json`, built daily from Wikidata (CC0). Portraits come from Wikimedia Commons. The summary is fetched live from Wikipedia. |
 | Satellites | Orbit data (TLEs) from CelesTrak, saved by `build_data.py` to `public/api/tle/`, so it loads instantly from the site itself. Starlink comes from CelesTrak's SpaceX-supplied feed when the main one is busy. The small groups refresh daily and Starlink (1.7 MB) every third day, to keep the git history small. If the snapshot is ever more than a few days old, the browser asks CelesTrak directly. Positions are calculated in the browser with satellite.js, in a Web Worker. |
+| Strike simulation | `public/js/strike.js` (effects scaling, flight model, casualty model). City populations come from Natural Earth (public domain), saved by `build_data.py` to `public/api/cities.json` and refreshed monthly. |
 | Headline archive and watchlist | Saved in each visitor's browser (localStorage). |
 | Borders and flags | `world-atlas` (Natural Earth) via jsDelivr, and flagcdn.com. |
 

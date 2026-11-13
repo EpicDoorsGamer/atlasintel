@@ -7,6 +7,7 @@ Build the site's static data in public/api/.
     python build_data.py --hotspots   # only refresh the news hotspots (fast, ~1 minute)
     python build_data.py --facts      # only refresh leaders & country facts (a few minutes: Wikidata allows 1 query/min)
     python build_data.py --tle        # only refresh satellite orbit data (about a minute)
+    python build_data.py --cities     # only refresh the world cities list (strike simulation)
 
 Writes:
     public/api/econ/<ISO3>.json      World Bank time series per country (GDP, trade, prices, ...)
@@ -20,6 +21,8 @@ Writes:
                                      government type, calling code, internet domain (Wikidata, CC0)
     public/api/tle/<group>.txt       satellite orbit data (TLEs) from CelesTrak, plus tle/index.json
                                      with when each group was downloaded
+    public/api/cities.json           ~7,300 cities with metro populations (Natural Earth), used by the
+                                     strike simulation to estimate casualties
 
 Runs daily on GitHub Actions (.github/workflows/update-data.yml). Standard library only.
 The World Bank API is slow (often 20s+ per request) and GDELT allows one request per 5 s,
@@ -83,6 +86,7 @@ WIKI_TITLE_OVERRIDES = {"NLD": "Netherlands", "PSE": "State_of_Palestine"}
 # The US has no federal official language in Wikidata, which lists territory languages instead
 LANGUAGE_OVERRIDES = {"USA": ["English (de facto national)", "Spanish"]}
 WIKIDATA = "https://query.wikidata.org/sparql"
+CITIES_MAX_AGE = 30 * 86400
 # satellite group -> (refresh after, minimum plausible count). Starlink is ~1.7 MB, so it is
 # refreshed every third day to keep the git history small; 3-day-old orbits are still within
 # a few tens of km, well under a pixel on the globe.
@@ -501,6 +505,31 @@ def tle(group):
     raise RuntimeError("CelesTrak: " + " | ".join(errors))
 
 
+def cities(_):
+    """World cities with metro populations (Natural Earth, public domain), for the strike
+    simulation's casualty estimate. The data changes rarely, so this refreshes monthly."""
+    path = os.path.join(OUT, "cities.json")
+    if fresh(path, CITIES_MAX_AGE):
+        return "fresh"
+    url = "https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_10m_populated_places_simple.geojson"
+    req = urllib.request.Request(url, headers={"User-Agent": "ATLAS-globe-data-build/1.0 (static site build)"})
+    with urllib.request.urlopen(req, timeout=180) as r:
+        feats = json.loads(r.read())["features"]
+    rows = []
+    for f in feats:
+        p = f["properties"]
+        pop = int(p.get("pop_max") or 0)
+        if pop <= 0:
+            continue
+        rows.append([p["name"], p.get("adm0_a3") or "", round(p["latitude"], 3), round(p["longitude"], 3), pop])
+    rows.sort(key=lambda x: -x[4])
+    if len(rows) < 5000:
+        raise RuntimeError(f"only {len(rows)} places")
+    save(path, {"source": "Natural Earth populated places (public domain)",
+                "fields": ["name", "adm0_a3", "lat", "lng", "pop_max"], "cities": rows})
+    return f"{len(rows)} cities"
+
+
 def run(fn, arg):
     try:
         print(f"{fn(arg):8} {arg if isinstance(arg, str) else arg[0]}", flush=True)
@@ -526,6 +555,8 @@ if __name__ == "__main__":
         sys.exit(0 if run(lambda _: facts(all_codes), "facts") else 1)
     if "--tle" in sys.argv:
         sys.exit(0 if all([run(tle, g) for g in TLE_GROUPS]) else 1)
+    if "--cities" in sys.argv:
+        sys.exit(0 if run(cities, "cities") else 1)
 
     # World Bank: parallel (slow responses, no strict rate limit)
     with ThreadPoolExecutor(6) as ex:
@@ -535,6 +566,7 @@ if __name__ == "__main__":
     results.append(run(hotspots, "hotspots"))
     results.append(run(lambda _: facts(all_codes), "facts"))
     results += [run(tle, g) for g in TLE_GROUPS]
+    results.append(run(cities, "cities"))
 
     # GDELT: strictly one request at a time
     if "--no-news" not in sys.argv:

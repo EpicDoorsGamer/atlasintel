@@ -51,6 +51,11 @@
     <div class="lock-label" id="lockLabel"></div>
   </div>
 
+  <!-- strike simulation: markers over the globe, detonation flash, alert banner -->
+  <svg id="strikeSvg" aria-hidden="true"></svg>
+  <div id="strikeFlash" aria-hidden="true"></div>
+  <div id="strikeAlert" role="status" hidden></div>
+
   <!-- top bar -->
   <header id="topbar">
     <div class="brand">
@@ -139,7 +144,51 @@
     <button data-t="night" title="Live day / night shading">NIGHT</button>
     <button data-t="hot" title="News hotspots, last 24 hours">HOTSPOTS</button>
     <button data-t="sats" title="Live satellite positions (CelesTrak)">SATS</button>
+    <button data-t="sim" class="t-sim" title="Nuclear strike simulation (rough public estimates, for education)">STRIKE SIM</button>
   </div>
+
+  <!-- strike simulation panel -->
+  <section id="simPanel" class="panel" hidden aria-label="Strike simulation">
+    <div class="panel-head"><span class="tag tag-red">SIM</span> STRIKE SIMULATION <button id="simClose" class="sim-x" title="Close the simulation">✕</button></div>
+    <div class="sim-body">
+      <div class="sim-field">
+        <span class="k">LAUNCH SITE</span>
+        <div class="sim-input">
+          <input id="simFrom" type="text" placeholder="TYPE A CITY · OR ⌖ AND CLICK THE GLOBE" autocomplete="off" spellcheck="false">
+          <button class="sim-pick" data-pick="launch" title="Click a point on the globe">⌖</button>
+          <ul class="sim-ac" id="simFromAc"></ul>
+        </div>
+      </div>
+      <div class="sim-field">
+        <span class="k">TARGET</span>
+        <div class="sim-input">
+          <input id="simTo" type="text" placeholder="TYPE A CITY · OR ⌖ AND CLICK THE GLOBE" autocomplete="off" spellcheck="false">
+          <button class="sim-pick" data-pick="target" title="Click a point on the globe">⌖</button>
+          <ul class="sim-ac" id="simToAc"></ul>
+        </div>
+      </div>
+      <div class="sim-field">
+        <span class="k">YIELD <b id="simYieldVal">100 KT</b></span>
+        <input type="range" id="simYield" min="-1" max="5" step="0.01" value="2" aria-label="Yield (logarithmic)">
+        <div class="sim-presets" id="simPresets"></div>
+        <div class="sim-yield-note" id="simYieldNote"></div>
+      </div>
+      <div class="sim-field">
+        <span class="k">BURST</span>
+        <div class="sim-seg" id="simBurst"><button data-burst="air" class="on">AIRBURST</button><button data-burst="surface">SURFACE</button></div>
+      </div>
+      <button id="simGo" class="sim-go">▲ LAUNCH</button>
+      <div id="simOut"></div>
+      <div class="note">EDUCATIONAL SIMULATION · ROUGH ESTIMATES FROM PUBLIC SOURCES: GLASSTONE &amp; DOLAN, <i>THE EFFECTS OF NUCLEAR WEAPONS</i> (1977) · US OTA, <i>THE EFFECTS OF NUCLEAR WAR</i> (1979) · POPULATION: NATURAL EARTH</div>
+    </div>
+  </section>
+
+  <!-- strike simulation: ground-zero close-up at true scale -->
+  <section id="strikeMap" class="panel" hidden aria-label="Tactical assessment">
+    <div class="panel-head"><span class="tag tag-red">GZ</span> TACTICAL ASSESSMENT <span class="count" id="smCoords"></span></div>
+    <svg id="smSvg" viewBox="-1.1 -1.1 2.2 2.2"></svg>
+    <div class="sm-foot" id="smFoot"></div>
+  </section>
 
   <!-- time slider -->
   <div id="timebar">
@@ -232,6 +281,7 @@
   <script src="js/daynight.js"></script>
   <script src="js/intro.js"></script>
   <script src="js/hands.js"></script>
+  <script src="js/strike.js"></script>
   <script src="js/commands.js"></script>
   <script src="js/app.js"></script>
 </body>
