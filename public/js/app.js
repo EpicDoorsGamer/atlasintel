@@ -221,7 +221,7 @@
     .polygonsTransitionDuration(900)
     .pointOfView({ lat: 22, lng: 10, altitude: 5.5 });
 
-  if (location.search.includes('debug')) window.ATLAS_DEBUG = { globe, styleGlobe: () => styleGlobe(), paint: () => paintSurface() };
+  if (location.search.includes('debug')) window.ATLAS_DEBUG = { globe, styleGlobe: () => styleGlobe(), paint: () => paintSurface(), hit: (x, y) => hitTest(x, y) };
 
   globe.renderer().setPixelRatio(Math.min(devicePixelRatio || 1, 1.5));
 
@@ -253,10 +253,36 @@
   }
   function featureContains(f, lng, lat) {
     const b = f.bbox;
-    if (b && (lng < b[0] || lng > b[2] || lat < b[1] || lat > b[3])) return false;
+    if (b && (lat < b[1] || lat > b[3])) return false;
     const polys = f.geometry.type === 'Polygon' ? [f.geometry.coordinates] : f.geometry.coordinates;
-    return polys.some(p => inRing(p[0], lng, lat) && !p.slice(1).some(h => inRing(h, lng, lat)));
+    // rings re-joined across the antimeridian run past ±180°, so also try the point one turn over
+    for (const x of [lng, lng + 360, lng - 360]) {
+      if (b && (x < b[0] || x > b[2])) continue;
+      if (polys.some(p => inRing(p[0], x, lat) && !p.slice(1).some(h => inRing(h, x, lat)))) return true;
+    }
+    return false;
   }
+  // A few rings (Russia's Chukotka, Fiji) jump from 180° to -180° part-way round. Drawn flat,
+  // that jump becomes a band across the whole map, and the 3D shape and camera framing break.
+  // Re-join such a ring so its longitudes run on continuously (past 180° if need be).
+  function unwrapRing(ring) {
+    let off = 0, moved = false;
+    const out = ring.map(([lng, lat], i) => {
+      if (i) {
+        const d = lng - ring[i - 1][0];
+        if (d > 180) off -= 360; else if (d < -180) off += 360;
+      }
+      if (off) moved = true;
+      return [lng + off, lat];
+    });
+    return moved && off === 0 ? out : ring; // a ring that circles the pole (Antarctica) stays as it is
+  }
+  function unwrapFeature(f) {
+    const g = f.geometry;
+    if (g.type === 'Polygon') g.coordinates = g.coordinates.map(unwrapRing);
+    else if (g.type === 'MultiPolygon') g.coordinates = g.coordinates.map(p => p.map(unwrapRing));
+  }
+  const normLng = lng => ((lng + 540) % 360) - 180;
   function featureAt(lat, lng) {
     return features.find(f => featureContains(f, lng, lat)) || null;
   }
@@ -277,17 +303,23 @@
       if (bestH) return bestH;
     }
     if (satsOn && satPos) {
+      // A satellite only beats the country under the pointer when the pointer is right on its
+      // dot. Starlink's 10,000+ dots would otherwise cover the whole globe and every country
+      // click would lock onto a satellite instead, so they only become pickable zoomed in.
+      const starlinkPickable = pov.altitude < 0.9;
       // a satellite is visible when the line of sight clears the globe
       const camHorizon = Math.acos(1 / (1 + pov.altitude));
-      let bestS = -1, dS = 7;
+      let bestS = -1, dS = Infinity;
       for (let i = 0; i < satMeta.length; i++) {
+        const group = satMeta[i].group;
+        if (group === 'starlink' && !starlinkPickable) continue;
         const km = satPos[i * 4 + 2];
         if (!satVisibleAlt(km)) continue;
         const lat = satPos[i * 4], lng = satPos[i * 4 + 1], a = km / R_EARTH_KM;
         if (angularDistance(pov, { lat, lng }) * Math.PI / 180 > camHorizon + Math.acos(1 / (1 + a))) continue;
         const p = globe.getScreenCoords(lat, lng, a);
         const d = Math.hypot(p.x - x, p.y - y);
-        if (d < dS) { dS = d; bestS = i; }
+        if (d < (SAT_PICK_PX[group] || 5) && d < dS) { dS = d; bestS = i; }
       }
       if (bestS >= 0) return { sat: true, ...satAt(bestS) };
     }
@@ -318,6 +350,9 @@
   globeEl.addEventListener('pointerdown', e => { downAt = [e.clientX, e.clientY]; stopTracking(); });
   globeEl.addEventListener('click', e => {
     if (!downAt || Math.hypot(e.clientX - downAt[0], e.clientY - downAt[1]) > 6) return; // was a drag
+    // a click that waited behind a busy frame no longer points where the user aimed: the globe
+    // has moved since, so it would pick whatever country is under that spot now
+    if (performance.now() - e.timeStamp > 500) return;
     activate(hitTest(e.clientX, e.clientY));
   });
   globeEl.addEventListener('pointermove', e => {
@@ -334,6 +369,7 @@
     const hi = await fetch('https://cdn.jsdelivr.net/npm/world-atlas@2.0.2/countries-50m.json').then(r => r.json());
     features = topojson.feature(hi, hi.objects.countries).features;
     for (const f of features) {
+      unwrapFeature(f);
       f.country = byNum.get(f.id) || null;
       if (f.country) f.country.feature = f;
     }
@@ -405,7 +441,7 @@
     otherBorders = new Path2D();
     for (const f of features) {
       const polys = f.geometry.type === 'Polygon' ? [f.geometry.coordinates] : f.geometry.coordinates;
-      const p = new Path2D();
+      let p = new Path2D();
       let x0 = 180, y0 = 90, x1 = -180, y1 = -90;
       for (const poly of polys) for (const ring of poly) {
         ring.forEach(([lng, lat], i) => {
@@ -413,6 +449,12 @@
           if (lng < x0) x0 = lng; if (lng > x1) x1 = lng; if (lat < y0) y0 = lat; if (lat > y1) y1 = lat;
         });
         p.closePath();
+      }
+      if (x1 > 180 || x0 < -180) { // runs off one edge of the map: draw it again on the other edge
+        const both = new Path2D();
+        both.addPath(p);
+        both.addPath(p, new DOMMatrix([1, 0, 0, 1, x1 > 180 ? -TEX_W : TEX_W, 0]));
+        p = both;
       }
       f.path = p;
       f.bbox = [x0, y0, x1, y1];
@@ -489,7 +531,7 @@
   function styleGlobe() {
     const sel = state.selected;
     schedulePaint();
-    globe.polygonsData(sel?.feature ? [sel.feature] : []);
+    globe.polygonsData(sel?.feature ? [extrusionFeature(sel.feature)] : []);
     globe
       .pointAltitude(c => c === sel ? selAlt + 0.003 : c.shape ? 0.008 : 0.02)
       .pointRadius(c => c === sel ? 0.05 : c.shape ? (sel ? 0.045 : 0.09) : (sel ? 0.15 : 0.3))
@@ -588,11 +630,44 @@
     const altitude = Math.max(0.32, Math.min(2.1, span / 24));
     // big countries: frame the landmass; small ones: the capital is close enough
     const w = Math.min(1, span / 6);
+    const cx = (x0 + x1) / 2, capLng = c.lng + Math.round((cx - c.lng) / 360) * 360; // same turn as the ring
     return {
       lat: c.lat + ((y0 + y1) / 2 - c.lat) * w,
-      lng: c.lng + ((x0 + x1) / 2 - c.lng) * w,
+      lng: normLng(capLng + (cx - capLng) * w),
       altitude,
     };
+  }
+
+  // The raised 3D shape of the selected nation is triangulated on the main thread, and at full
+  // detail Russia took ~7 s (Canada, Indonesia: seconds too). The extruded copy drops islands
+  // under 0.05% of the main landmass and detail finer than ~1/300 of its size; the flat painted
+  // outline underneath keeps every vertex.
+  function extrusionFeature(f) {
+    if (f.ext) return f.ext;
+    const polys = f.geometry.type === 'Polygon' ? [f.geometry.coordinates] : f.geometry.coordinates;
+    const total = polys.reduce((s, p) => s + p.reduce((t, r) => t + r.length, 0), 0);
+    if (total < 600) return (f.ext = f);
+    const area = r => {
+      let a = 0;
+      for (let i = 0, j = r.length - 1; i < r.length; j = i++) a += (r[j][0] - r[i][0]) * (r[j][1] + r[i][1]);
+      return Math.abs(a / 2);
+    };
+    const ranked = polys.map(p => ({ p, a: area(p[0]) })).sort((u, v) => v.a - u.a);
+    let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+    for (const [x, y] of ranked[0].p[0]) { x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y); }
+    const tol = Math.max(0.02, Math.max(y1 - y0, (x1 - x0) * Math.cos((y0 + y1) / 2 * Math.PI / 180)) / 300);
+    const thin = (r, isOuter) => {
+      const out = [r[0]];
+      for (let i = 1; i < r.length - 1; i++) {
+        const l = out[out.length - 1];
+        if (Math.hypot(r[i][0] - l[0], r[i][1] - l[1]) >= tol) out.push(r[i]);
+      }
+      out.push(r[r.length - 1]);
+      return out.length >= 4 ? out : isOuter ? r : null;
+    };
+    const coords = ranked.filter((x, i) => i === 0 || x.a >= ranked[0].a * 0.0005).slice(0, 40)
+      .map(({ p }) => [thin(p[0], true), ...p.slice(1).map(h => thin(h, false)).filter(Boolean)]);
+    return (f.ext = { type: 'Feature', properties: f.properties, geometry: { type: 'MultiPolygon', coordinates: coords } });
   }
 
   let selectSeq = 0;
@@ -1451,6 +1526,7 @@
   const groupIndex = Object.fromEntries(Satellites.GROUPS.map((g, i) => [g.id, i]));
   const R_EARTH_KM = 6371;
   const satVisibleAlt = km => km > 80 && km < 3000; // GPS / geostationary sit far beyond the camera
+  const SAT_PICK_PX = { stations: 9, weather: 5, visual: 5, starlink: 4 }; // hover / click radius
 
   function onSatellites({ meta, pos }) {
     if (!satsOn) return;
