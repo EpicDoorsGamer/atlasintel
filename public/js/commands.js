@@ -38,7 +38,12 @@ window.CommandBar = (() => {
     { re: /gdp|econom|largest|biggest|smallest|nation|countr/, ind: 'NY.GDP.MKTP.CD' },
   ];
   const metricOf = text => METRICS.find(m => m.re.test(text))?.ind || null;
-  const TOGGLES = { night: 'night', 'day night': 'night', shading: 'night', hotspot: 'hot', hotspots: 'hot', hand: 'hands', hands: 'hands', gesture: 'hands', gestures: 'hands', camera: 'hands', webcam: 'hands' };
+  const BLOCS = {
+    nato: 'nato', eu: 'eu', 'european union': 'eu', brics: 'brics', g20: 'g20', 'g-20': 'g20', 'g 20': 'g20',
+    g7: 'g7', 'g-7': 'g7', opec: 'opec', asean: 'asean', au: 'au', 'african union': 'au', gcc: 'gcc', sco: 'sco',
+    'five eyes': 'fiveeyes', '5 eyes': 'fiveeyes', quad: 'quad', usmca: 'usmca',
+  };
+  const TOGGLES = { sats: 'sats', satellites: 'sats', satellite: 'sats', orbit: 'sats', night: 'night', 'day night': 'night', shading: 'night', hotspot: 'hot', hotspots: 'hot', hand: 'hands', hands: 'hands', gesture: 'hands', gestures: 'hands', camera: 'hands', webcam: 'hands' };
 
   function norm(t) {
     return t.toLowerCase().replace(/[’']/g, "'").replace(/[^a-z0-9' -]/g, ' ').replace(/\s+/g, ' ').trim().replace(/^the /, '');
@@ -82,6 +87,31 @@ window.CommandBar = (() => {
     // reset
     q => /^(reset|home|close|exit|back|zoom out|clear)$/.test(q) && {
       icon: '⟲', title: 'Reset view', sub: 'Close the dossier and return to the latest data', run: () => { api.reset(); },
+    },
+
+    // alliances: show nato / highlight brics / g20
+    q => {
+      const m = q.match(/^(?:show |highlight |bloc |alliance |members of |light up )?(.+)$/);
+      const id = m && BLOCS[m[1]];
+      if (!id) return null;
+      const a = api.alliances.find(x => x.id === id);
+      return { icon: '⬡', title: `Highlight ${a.name}`, sub: `${a.full} · ${a.members.length} members`, run: () => { api.bloc(id); } };
+    },
+    q => /^(?:hide|clear|close|remove) (?:the )?(?:bloc|alliance|highlight)s?$/.test(q) && { icon: '⬡', title: 'Clear alliance highlight', run: () => { api.clearBloc(); } },
+
+    // satellites
+    q => /^(?:track|follow|find|where is)(?: the)? iss$|^iss$/.test(q) && { icon: '◆', title: 'Track the International Space Station', sub: 'Camera follows it live', run: () => { api.trackIss(); } },
+    q => /^(stop tracking|untrack|release)$/.test(q) && { icon: '◆', title: 'Stop tracking', run: () => { api.stopTracking(); } },
+    q => {
+      const m = q.match(/^(?:time )?warp(?: (on|off))?$/);
+      return m && { icon: '»', title: `Satellite time warp ${m[1] === 'off' ? 'off (live)' : m[1] === 'on' ? 'on (×60)' : 'on/off'}`, run: () => { api.warp(m[1] ? m[1] === 'on' : undefined); } };
+    },
+
+    // who leads france / profile japan
+    q => {
+      const m = q.match(/^(?:who (?:leads|runs|governs|rules)|leaders? of|profile(?: of)?|facts (?:about|on)|president of|prime minister of)\s+(.+)$/);
+      const c = m && findCountry(m[1]);
+      return c && { icon: '☺', title: `${c.name} · PROFILE`, sub: 'Leaders, quick facts and briefing', run: () => { api.select(c, 'profile'); } };
     },
 
     // live
@@ -147,7 +177,7 @@ window.CommandBar = (() => {
       }
       const key = TOGGLES[norm(word)];
       if (!key) return null;
-      const names = { night: 'Day/night shading', hot: 'News hotspots', hands: 'Hand-gesture control' };
+      const names = { night: 'Day/night shading', hot: 'News hotspots', hands: 'Hand-gesture control', sats: 'Live satellites' };
       return { icon: '⏻', title: `${names[key]} ${on === undefined ? 'on/off' : on ? 'on' : 'off'}`, run: () => { api.toggle(key, on); } };
     },
 
@@ -171,10 +201,10 @@ window.CommandBar = (() => {
 
     // news japan / trade germany / economy brazil
     q => {
-      const m = q.match(/^(news|headlines|trade|economy|archive)\s+(?:for |of |on |about |in )?(.+)$/);
+      const m = q.match(/^(news|headlines|trade|economy|archive|profile|facts|leaders)\s+(?:for |of |on |about |in )?(.+)$/);
       const c = m && findCountry(m[2]);
       if (!c) return null;
-      const tab = { news: 'news', headlines: 'news', trade: 'trade', economy: 'economy', archive: 'archive' }[m[1]];
+      const tab = { news: 'news', headlines: 'news', trade: 'trade', economy: 'economy', archive: 'archive', profile: 'profile', facts: 'profile', leaders: 'profile' }[m[1]];
       return { icon: '◎', title: `${c.name} · ${tab.toUpperCase()}`, sub: 'Open dossier tab', run: () => { api.select(c, tab); } };
     },
 
@@ -192,11 +222,14 @@ window.CommandBar = (() => {
   const HELP = `<div class="cmd-title">COMMANDS</div><dl class="cmd-help">
     <dt>go to brazil</dt><dd>fly to a country (or just type its name)</dd>
     <dt>news japan · trade germany</dt><dd>open a dossier tab</dd>
+    <dt>who leads france</dt><dd>leaders, portraits and quick facts (also: profile japan)</dd>
+    <dt>show nato</dt><dd>light up an alliance: eu · brics · g20 · g7 · opec · asean · au · gcc · sco · five eyes · quad · usmca · <i>clear bloc</i></dd>
+    <dt>track iss</dt><dd>follow the space station · <i>warp</i> speeds satellites up ×60 · <i>stop tracking</i></dd>
     <dt>top 10 exporters</dt><dd>also: bottom 5 growth · richest 10 · largest 20 in 2000</dd>
     <dt>compare germany and france</dt><dd>side-by-side table, up to 4 countries</dd>
     <dt>play 2000 to 2020</dt><dd>animate the time slider · <i>year 1998</i> · <i>live</i></dd>
     <dt>layer exports</dt><dd>colour the globe by gdp, per capita, exports, imports or growth</dd>
-    <dt>night off · hotspots on · hands on</dt><dd>switch display features</dd>
+    <dt>night off · hotspots on · sats off · hands on</dt><dd>switch display features</dd>
     <dt>watch netherlands</dt><dd>add / remove from your watchlist</dd>
     <dt>reset</dt><dd>close the dossier and go home</dd>
   </dl>`;
@@ -204,7 +237,7 @@ window.CommandBar = (() => {
   function suggest(text) {
     const q = norm(text);
     if (!q) {
-      return ['top 10 exporters', 'go to brazil', 'play 2000 to 2020', 'compare germany and france', 'richest 10 in 2005', 'hotspots off', 'help']
+      return ['show nato', 'who leads france', 'track iss', 'top 10 exporters', 'play 2000 to 2020', 'compare germany and france', 'help']
         .map(ex => ({ icon: '›', title: ex, sub: 'Example', fill: ex }));
     }
     const res = [];

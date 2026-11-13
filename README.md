@@ -29,7 +29,19 @@ It is a fully **static site**, so it can be hosted for free on Cloudflare Pages.
   - **Fist and hold:** close the dossier.
 
   It uses Google MediaPipe hand tracking in the browser. The video is processed on your device and is never uploaded. The model (about 8 MB) downloads only the first time you turn HANDS on.
-- **Toggles:** top right: **HANDS**, **NIGHT** and **HOTSPOTS**. Your choices are remembered in your browser.
+- **Country profile (first dossier tab):**
+  - **Leaders:** the head of state and head of government, with portraits.
+  - **Quick facts:** currency, languages, government type, calling code and internet domain.
+  - **Memberships:** the alliances the country belongs to.
+  - **Briefing:** a short Wikipedia summary.
+
+  Portraits are shown with a holographic tint; hover over one to see the true colours.
+- **Alliances (BLOCS tab, or `show nato`):** NATO, EU, BRICS, G20, G7, OPEC, ASEAN, African Union, GCC, SCO, Five Eyes, QUAD and USMCA. The members light up together, and a card shows their combined GDP, population, exports, imports and largest economy. Member lists live in `public/js/alliances.js`; update them when membership changes.
+- **Live satellites (SATS):** the space stations, weather satellites, the brightest satellites and the whole Starlink fleet, shown at their real positions and updated twice a second.
+  - **Hover** a dot for its name, altitude and speed. **Click** it to follow it with the camera.
+  - **TRACK ISS** follows the space station and draws its orbit for the next 95 minutes.
+  - **WARP ×60** speeds time up so you can see them move.
+- **Toggles:** top right: **HANDS**, **NIGHT**, **HOTSPOTS** and **SATS**. Your choices are remembered in your browser.
 
 ---
 
@@ -43,6 +55,8 @@ It is a fully **static site**, so it can be hosted for free on Cloudflare Pages.
 | Time slider | `public/api/history/<indicator>.json`, built from the economy files. |
 | News hotspots | `public/api/hotspots.json`, built from the last 24 hours of GDELT's raw 15-minute event files. These are plain downloads with no rate limit, and the step takes about a minute. |
 | Night lights | NASA "Black Marble" image (via the three-globe package on jsDelivr), blended in the browser. |
+| Leaders & facts | `public/api/facts.json`, built daily from Wikidata (CC0). Portraits come from Wikimedia Commons. The summary is fetched live from Wikipedia. |
+| Satellites | Orbit data (TLEs) from CelesTrak. `functions/api/tle.js` is a Cloudflare Pages Function that caches it at the edge for 2 hours, so all visitors share one download (CelesTrak blocks repeat downloads within 2 hours). Positions are calculated in the browser with satellite.js, in a Web Worker. |
 | Headline archive and watchlist | Saved in each visitor's browser (localStorage). |
 | Borders and flags | `world-atlas` (Natural Earth) via jsDelivr, and flagcdn.com. |
 
@@ -58,7 +72,8 @@ public/                  ← this folder is the website (Cloudflare Pages output
   js/app.js              globe, animations, dossier, charts, news
   js/countries.js        193 UN members + 2 observers
   api/                   generated data (committed to git)
-build_data.py            downloads World Bank data + GDELT snapshots into public/api/
+build_data.py            downloads World Bank data, GDELT snapshots and Wikidata facts into public/api/
+functions/api/tle.js     Cloudflare Pages Function: edge-cached satellite orbit data
 .github/workflows/update-data.yml   runs build_data.py daily and commits the result
 ```
 

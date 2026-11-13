@@ -65,7 +65,8 @@
     selected: null,
     hover: null,
     econ: {},             // iso3 -> payload
-    tab: 'economy',
+    tab: 'profile',
+    bloc: null,           // highlighted alliance (see alliances.js)
     indexTab: 'all',
     watch: new Set(store.get('watch', [])),
     year: null,           // null = latest reported values; a number = time-slider year
@@ -275,6 +276,21 @@
       for (const h of state.hotspots) { const d = screenDist(h.lat, h.lng); if (d < dH) { dH = d; bestH = h; } }
       if (bestH) return bestH;
     }
+    if (satsOn && satPos) {
+      // a satellite is visible when the line of sight clears the globe
+      const camHorizon = Math.acos(1 / (1 + pov.altitude));
+      let bestS = -1, dS = 7;
+      for (let i = 0; i < satMeta.length; i++) {
+        const km = satPos[i * 4 + 2];
+        if (!satVisibleAlt(km)) continue;
+        const lat = satPos[i * 4], lng = satPos[i * 4 + 1], a = km / R_EARTH_KM;
+        if (angularDistance(pov, { lat, lng }) * Math.PI / 180 > camHorizon + Math.acos(1 / (1 + a))) continue;
+        const p = globe.getScreenCoords(lat, lng, a);
+        const d = Math.hypot(p.x - x, p.y - y);
+        if (d < dS) { dS = d; bestS = i; }
+      }
+      if (bestS >= 0) return { sat: true, ...satAt(bestS) };
+    }
     let best = null, bestD = 14; // tiny states: nearest capital beacon wins
     for (const c of COUNTRIES) {
       if (c.lat == null) continue;
@@ -288,6 +304,7 @@
   }
   function activate(hit) {
     if (!hit) return;
+    if (hit.sat) return trackSat(hit.i);
     if (hit.hot) {
       if (hit.country) select(hit.country);
       else toast(`HOTSPOT · ${hit.name.toUpperCase()} · OUTSIDE UN MEMBER TERRITORY`);
@@ -298,7 +315,7 @@
 
   const globeEl = $('globe');
   let downAt = null, hoverRaf = 0, lastMove = null;
-  globeEl.addEventListener('pointerdown', e => { downAt = [e.clientX, e.clientY]; });
+  globeEl.addEventListener('pointerdown', e => { downAt = [e.clientX, e.clientY]; stopTracking(); });
   globeEl.addEventListener('click', e => {
     if (!downAt || Math.hypot(e.clientX - downAt[0], e.clientY - downAt[1]) > 6) return; // was a drag
     activate(hitTest(e.clientX, e.clientY));
@@ -333,12 +350,20 @@
     // hover outline (a few thin lines instead of re-building country meshes)
     globe
       .pathsData([])
-      .pathPoints(d => d)
+      .pathPoints(d => d.pts || d)
       .pathPointLat(p => p[1])
       .pathPointLng(p => p[0])
-      .pathPointAlt(0.004)
-      .pathColor(() => 'rgba(200, 252, 255, 0.95)')
+      .pathPointAlt(p => p[2] ?? 0.004)
+      .pathColor(d => d.pts ? ['rgba(255, 179, 0, 0.05)', 'rgba(255, 179, 0, 0.85)'] : 'rgba(200, 252, 255, 0.95)')
       .pathTransitionDuration(0);
+
+    // satellites: one particle cloud per group (a single draw call each)
+    globe
+      .particlesData([])
+      .particleLat('lat').particleLng('lng').particleAltitude('alt')
+      .particlesSize(set => set.size)
+      .particlesColor(set => set.color)
+      .particlesSizeAttenuation(true);
 
     // capitals as small beacons, merged into ONE mesh; tiny island states get a bigger one
     globe
@@ -406,8 +431,11 @@
     const sel = state.selected;
     if (skyReady) sg.drawImage(sky, 0, 0, TEX_W, TEX_H);
     else { sg.fillStyle = '#071c27'; sg.fillRect(0, 0, TEX_W, TEX_H); }
+    const bloc = state.bloc;
     for (const f of features) {
-      sg.fillStyle = f.country ? colourFor(f.country.iso3, sel ? 0.35 : 1) : (sel ? 'rgba(40,60,70,0.05)' : 'rgba(60,80,90,0.12)');
+      sg.fillStyle = !f.country ? (sel || bloc ? 'rgba(40,60,70,0.05)' : 'rgba(60,80,90,0.12)')
+        : bloc ? (bloc.set.has(f.country.iso3) ? 'rgba(0, 229, 255, 0.55)' : colourFor(f.country.iso3, 0.22))
+        : colourFor(f.country.iso3, sel ? 0.35 : 1);
       sg.fill(f.path, 'evenodd');
     }
     sg.lineJoin = 'round';
@@ -417,6 +445,11 @@
     sg.lineWidth = 1.8;
     sg.strokeStyle = sel ? 'rgba(0, 229, 255, 0.35)' : 'rgba(0, 229, 255, 0.6)';
     sg.stroke(unBorders);
+    if (bloc?.path) {
+      sg.lineWidth = 3.2;
+      sg.strokeStyle = 'rgba(225, 254, 255, 0.95)';
+      sg.stroke(bloc.path);
+    }
     if (hotOn) {
       for (const h of state.hotspots) {
         // widen by 1/cos(lat) so dots stay round on the sphere
@@ -461,13 +494,17 @@
       .pointAltitude(c => c === sel ? selAlt + 0.003 : c.shape ? 0.008 : 0.02)
       .pointRadius(c => c === sel ? 0.05 : c.shape ? (sel ? 0.045 : 0.09) : (sel ? 0.15 : 0.3))
       .pointColor(c => c === sel ? '#ffb300' : c.shape ? 'rgba(160, 245, 255, 0.85)' : '#00e5ff');
-    updateHoverOutline();
+    updatePaths();
   }
-  function updateHoverOutline() {
+  function updateHoverOutline() { updatePaths(); }
+  function updatePaths() {
     const f = state.hover && state.hover !== state.selected ? state.hover.feature : null;
-    if (!f) { globe.pathsData([]); return; }
-    const polys = f.geometry.type === 'Polygon' ? [f.geometry.coordinates] : f.geometry.coordinates;
-    globe.pathsData(polys.map(p => p[0]).filter(r => r.length > 6).sort((a, b) => b.length - a.length).slice(0, 14));
+    let rings = [];
+    if (f) {
+      const polys = f.geometry.type === 'Polygon' ? [f.geometry.coordinates] : f.geometry.coordinates;
+      rings = polys.map(p => p[0]).filter(r => r.length > 6).sort((a, b) => b.length - a.length).slice(0, 14);
+    }
+    globe.pathsData(satsOn && issOrbit ? rings.concat(issOrbit) : rings);
   }
 
   // ------------------------------------------------------------ hover tooltip
@@ -490,10 +527,18 @@
   }
   function setHover(c) {
     if (!mouseOnGlobe) c = null; // globe.gl re-fires hover during camera flights at a stale pointer position
-    const country = c && !c.nonUN && !c.hot ? c : null;
+    const country = c && !c.nonUN && !c.hot && !c.sat ? c : null;
     const changed = country !== state.hover;
     state.hover = country;
     if (!c) { tooltip.style.display = 'none'; }
+    else if (c.sat) {
+      const g = Satellites.GROUPS.find(x => x.id === c.group);
+      tooltip.innerHTML = `<div class="tt-name" style="color:${g?.color || '#fff'}">&#9670; ${esc(g?.label || 'SATELLITE')}</div>
+        <div class="tt-name">${esc(c.name)}</div>
+        <div class="tt-row">ALTITUDE <b>${Math.round(c.altKm).toLocaleString('en-US')} KM</b> · SPEED <b>${c.speed.toFixed(2)} KM/S</b></div>
+        <div class="tt-row">NORAD <b>${esc(c.norad)}</b> · CLICK TO TRACK</div>`;
+      tooltip.style.display = 'block'; placeTooltip();
+    }
     else if (c.hot) {
       tooltip.innerHTML = `<div class="tt-name" style="color:rgb(${hotColour(c)})">&#9673; NEWS HOTSPOT</div>
         <div class="tt-name">${esc(c.name)}</div>
@@ -557,6 +602,7 @@
     if (state.selected === c) { if (tab) renderTab(); return; }
     const seq = ++selectSeq;
     state.selected = c;
+    stopTracking();
     tooltip.style.display = 'none';
     closeSearch();
 
@@ -698,7 +744,8 @@
     const tab = state.tab, out = $('dBody');
     out.innerHTML = (tab === 'economy' || tab === 'trade') && !state.econLoaded?.has(c.iso3) ? quickLook(c) : `<div class="loading">RETRIEVING ${tab.toUpperCase()} DATA</div>`;
     try {
-      if (tab === 'economy') await renderEconomy(c, out);
+      if (tab === 'profile') await renderProfile(c, out);
+      else if (tab === 'economy') await renderEconomy(c, out);
       else if (tab === 'trade') await renderTrade(c, out);
       else if (tab === 'news') await renderNews(c, out);
       else await renderArchive(c, out);
@@ -930,13 +977,23 @@
   function renderIndex() {
     const ind = state.layer, L = LAYERS[ind], vals = valuesFor(ind);
     $('indexMetric').textContent = L.short + (state.year ? ' · ' + state.year : '');
+    if (state.indexTab === 'blocs' && !state.bloc) {
+      $('indexCount').textContent = ALLIANCES.length;
+      $('indexList').innerHTML = ALLIANCES.map(a => `<li data-bloc="${a.id}" class="bloc-row">
+        <span class="bn">${esc(a.name)}</span><span class="bf">${esc(a.full)}</span>
+        <span class="bm">${a.members.length}</span><span class="bg">${usd(blocTotals(a).gdp)}</span></li>`).join('');
+      return;
+    }
     let list = COUNTRIES.slice();
     if (state.indexTab === 'watch') list = list.filter(c => state.watch.has(c.iso3));
+    if (state.indexTab === 'blocs') list = list.filter(c => state.bloc.set.has(c.iso3));
     const val = c => vals?.[c.iso3]?.[1];
     list.sort((a, b) => (val(b) ?? -Infinity) - (val(a) ?? -Infinity) || a.name.localeCompare(b.name));
     $('indexCount').textContent = list.length;
     const rk = ranksFor(ind);
-    $('indexList').innerHTML = list.length ? list.map(c => {
+    const head = state.indexTab === 'blocs' && state.bloc
+      ? `<li class="bloc-head"><b>${esc(state.bloc.name)}</b> · ${state.bloc.members.length} MEMBERS<button class="bloc-x" title="Back to all blocs">✕</button></li>` : '';
+    $('indexList').innerHTML = head + (list.length ? list.map(c => {
       const v = val(c), t = layerT(c.iso3);
       return `<li data-iso="${c.iso3}">
         <span class="rk">${rk?.get(c.iso3) ? '#' + rk.get(c.iso3) : '—'}</span>
@@ -945,18 +1002,18 @@
         <span class="vl">${v != null ? L.fmt(v) : 'N/A'}</span>
         <span class="bar"><i style="width:${t == null ? 0 : Math.abs(t) * 100}%;${t < 0 ? 'background:#ff6a3d' : ''}"></i></span>
       </li>`;
-    }).join('') : `<li class="empty">${state.indexTab === 'watch' ? 'WATCHLIST EMPTY — OPEN A NATION AND PRESS ☆ TO TRACK IT.' : 'NO DATA'}</li>`;
+    }).join('') : `<li class="empty">${state.indexTab === 'watch' ? 'WATCHLIST EMPTY — OPEN A NATION AND PRESS ☆ TO TRACK IT.' : 'NO DATA'}</li>`);
   }
   $('indexList').addEventListener('click', e => {
+    if (e.target.closest('.bloc-x')) return clearBloc();
+    const bl = e.target.closest('li[data-bloc]');
+    if (bl) return setBloc(bl.dataset.bloc);
     const li = e.target.closest('li[data-iso]');
     if (li) select(byIso3.get(li.dataset.iso));
   });
   document.querySelector('.index-tabs').addEventListener('click', e => {
     const b = e.target.closest('button');
-    if (!b) return;
-    state.indexTab = b.dataset.tab;
-    for (const x of b.parentNode.children) x.classList.toggle('on', x === b);
-    renderIndex();
+    if (b) setIndexTab(b.dataset.tab);
   });
 
   // ------------------------------------------------------------ watchlist
@@ -1233,9 +1290,11 @@
     set('hands', Hands.active);
     set('night', nightOn);
     set('hot', hotOn);
+    set('sats', satsOn);
   }
   function setOption(k, on) {
     if (k === 'hands') return toggleHands(on);
+    if (k === 'sats') return setSats(on ?? !satsOn);
     if (k === 'night') { nightOn = on ?? !nightOn; store.set('opt.night', nightOn); updateSky(); }
     if (k === 'hot') { hotOn = on ?? !hotOn; store.set('opt.hot', hotOn); updateHotspots(); }
     renderToggles();
@@ -1245,6 +1304,244 @@
     if (b) setOption(b.dataset.t);
   });
 
+
+  // ------------------------------------------------------------ alliances / blocs
+  const ALLIANCES = (window.ALLIANCES || []).map(a => ({ ...a, set: new Set(a.members) }));
+  const allianceById = new Map(ALLIANCES.map(a => [a.id, a]));
+  const latestVal = (ind, iso) => state.global[ind]?.values?.[iso]?.[1];
+
+  function blocTotals(a) {
+    const sum = ind => a.members.reduce((s, iso) => s + (latestVal(ind, iso) || 0), 0);
+    const gdp = sum('NY.GDP.MKTP.CD'), pop = sum('SP.POP.TOTL');
+    const exp = sum('NE.EXP.GNFS.CD'), imp = sum('NE.IMP.GNFS.CD');
+    const worldGdp = latestVal('NY.GDP.MKTP.CD', 'WLD'), worldPop = latestVal('SP.POP.TOTL', 'WLD');
+    const largest = a.members.map(iso => byIso3.get(iso)).filter(Boolean)
+      .sort((x, y) => (latestVal('NY.GDP.MKTP.CD', y.iso3) || 0) - (latestVal('NY.GDP.MKTP.CD', x.iso3) || 0))[0];
+    return { gdp, pop, exp, imp, gdpShare: worldGdp ? gdp / worldGdp * 100 : null, popShare: worldPop ? pop / worldPop * 100 : null, largest };
+  }
+
+  async function setBloc(id) {
+    const a = typeof id === 'string' ? allianceById.get(id) : id;
+    if (!a) return;
+    await Promise.all(['NE.EXP.GNFS.CD', 'NE.IMP.GNFS.CD', 'SP.POP.TOTL'].map(ind => loadGlobal(ind).catch(() => {})));
+    if (!a.path) {
+      a.path = new Path2D();
+      for (const iso of a.members) { const f = byIso3.get(iso)?.feature; if (f?.path) a.path.addPath(f.path); }
+    }
+    state.bloc = a;
+    stopTracking();
+    renderBlocCard();
+    schedulePaint();
+    if (state.indexTab !== 'blocs') setIndexTab('blocs'); else renderIndex();
+    // frame the members: centre on the mean direction of their capitals
+    const caps = a.members.map(iso => byIso3.get(iso)).filter(c => c?.lat != null);
+    const r = Math.PI / 180;
+    const v = caps.reduce((acc, c) => [acc[0] + Math.cos(c.lat * r) * Math.cos(c.lng * r), acc[1] + Math.cos(c.lat * r) * Math.sin(c.lng * r), acc[2] + Math.sin(c.lat * r)], [0, 0, 0]);
+    const centre = { lat: Math.atan2(v[2], Math.hypot(v[0], v[1])) / r, lng: Math.atan2(v[1], v[0]) / r };
+    const spread = Math.max(...caps.map(c => angularDistance(centre, c)));
+    if (!state.selected) {
+      controls.autoRotate = false;
+      globe.pointOfView({ ...centre, altitude: Math.max(1.3, Math.min(3.2, spread / 26)) }, 1500);
+    }
+  }
+  function clearBloc() {
+    if (!state.bloc) return;
+    state.bloc = null;
+    $('blocCard').hidden = true;
+    schedulePaint();
+    renderIndex();
+    if (!state.selected) setTimeout(() => { if (!state.selected && !state.bloc) controls.autoRotate = true; }, 1500);
+  }
+  function renderBlocCard() {
+    const a = state.bloc, card = $('blocCard');
+    if (!a) { card.hidden = true; return; }
+    const t = blocTotals(a);
+    card.innerHTML = `
+      <button class="bc-close" title="Clear highlight">✕</button>
+      <div class="bc-head"><span class="bc-name">${esc(a.name)}</span>
+        <span class="bc-full">${esc(a.full)}<br><b>${esc(a.kind)}</b> · SINCE ${a.since} · ${a.members.length} UN MEMBERS</span></div>
+      <div class="bc-stats">
+        <div><span class="k">COMBINED GDP</span><span class="v">${usd(t.gdp)}</span><span class="s">${t.gdpShare ? t.gdpShare.toFixed(1) + '% OF WORLD' : ''}</span></div>
+        <div><span class="k">POPULATION</span><span class="v">${big(t.pop)}</span><span class="s">${t.popShare ? t.popShare.toFixed(1) + '% OF WORLD' : ''}</span></div>
+        <div><span class="k">EXPORTS</span><span class="v">${usd(t.exp)}</span><span class="s">GOODS &amp; SERVICES</span></div>
+        <div><span class="k">IMPORTS</span><span class="v">${usd(t.imp)}</span><span class="s">BALANCE ${t.exp - t.imp >= 0 ? '+' : ''}${usd(t.exp - t.imp)}</span></div>
+        <div><span class="k">LARGEST ECONOMY</span><span class="v sm">${t.largest ? esc(t.largest.name) : '—'}</span><span class="s">${t.largest ? usd(latestVal('NY.GDP.MKTP.CD', t.largest.iso3)) : ''}</span></div>
+      </div>
+      ${a.note ? `<div class="bc-note">${esc(a.note)}</div>` : ''}`;
+    card.hidden = false;
+    holoIn([card]);
+    card.querySelector('.bc-close').onclick = clearBloc;
+  }
+  function setIndexTab(tab) {
+    state.indexTab = tab;
+    for (const x of document.querySelector('.index-tabs').children) x.classList.toggle('on', x.dataset.tab === tab);
+    renderIndex();
+  }
+
+  // ------------------------------------------------------------ profile: leaders & quick facts
+  let factsReq = null;
+  const getFacts = () => (factsReq ||= getJSON('api/facts.json').catch(e => { factsReq = null; throw e; }));
+  const wikiReq = {};
+  function wikiSummary(title) {
+    if (!title) return Promise.resolve(null);
+    return (wikiReq[title] ||= fetch(`https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(title)}`)
+      .then(r => (r.ok ? r.json() : null)).catch(() => null));
+  }
+  const wikiUrl = t => `https://en.wikipedia.org/wiki/${encodeURIComponent(t.replace(/ /g, '_'))}`;
+
+  function leaderCard(p, role) {
+    const office = p.offices.length === 1 ? p.offices[0] : role;
+    const name = p.wiki ? `<a href="${esc(wikiUrl(p.wiki))}" target="_blank" rel="noopener noreferrer">${esc(p.name)}</a>` : esc(p.name);
+    return `<div class="leader">
+      <div class="portrait${p.img ? '' : ' noimg'}">
+        ${p.img ? `<img src="${esc(p.img)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.parentNode.classList.add('noimg');this.remove()">` : ''}
+        <span class="scan"></span>
+      </div>
+      <div class="l-role">${esc(role)}</div>
+      <div class="l-name">${name}</div>
+      ${office && office !== role ? `<div class="l-office">${esc(office)}</div>` : ''}
+    </div>`;
+  }
+
+  async function renderProfile(c, out) {
+    const [facts, econ] = await Promise.all([getFacts().catch(() => null), getEcon(c).catch(() => null)]);
+    if (!stillOn(c, 'profile')) return;
+    const f = facts?.countries?.[c.iso3];
+    const hos = f?.hos || [], hog = f?.hog || [];
+    const both = hos.filter(p => hog.some(q => q.id === p.id));
+    const cards = [
+      ...both.map(p => leaderCard(p, 'HEAD OF STATE & GOVERNMENT')),
+      ...hos.filter(p => !both.includes(p)).map(p => leaderCard(p, 'HEAD OF STATE')),
+      ...hog.filter(p => !both.some(q => q.id === p.id)).map(p => leaderCard(p, 'HEAD OF GOVERNMENT')),
+    ];
+    const pop = latest(econ?.series?.population);
+    const fact = (k, v) => `<div class="tile"><div class="k">${k}</div><div class="v sm">${v || '—'}</div></div>`;
+    const blocs = ALLIANCES.filter(a => a.set.has(c.iso3));
+    out.innerHTML = `
+      <div class="sec-title">LEADERSHIP <span class="yr">WIKIDATA</span></div>
+      ${cards.length ? `<div class="leaders">${cards.join('')}</div>` : '<div class="loading" style="animation:none">NO LEADERSHIP RECORD</div>'}
+      <div class="sec-title">QUICK FACTS</div>
+      <div class="tiles">
+        ${fact('Capital', esc(c.capital))}
+        ${fact('Population', pop ? `${big(pop[1])} <small>${pop[0]}</small>` : '')}
+        ${fact('Currency', esc((f?.currencies || []).join(', ')))}
+        ${fact('Languages', esc((f?.languages || []).slice(0, 4).join(', ')))}
+        ${fact('Government', esc((f?.government || []).join(', ')))}
+        ${fact('Calling code · Domain', esc([f?.calling ? '+' + String(f.calling).replace(/^\+/, '') : '', f?.tld].filter(Boolean).join(' · ')))}
+      </div>
+      ${blocs.length ? `<div class="sec-title">MEMBERSHIPS</div><div class="chips">${blocs.map(a => `<button class="chip" data-bloc="${a.id}" title="${esc(a.full)}">${esc(a.name)}</button>`).join('')}</div>` : ''}
+      <div class="sec-title">BRIEFING <span class="yr">WIKIPEDIA</span></div>
+      <div class="wiki" id="wikiBrief"><div class="loading">ACCESSING ARCHIVE</div></div>
+      <div class="note">LEADERS &amp; FACTS · WIKIDATA (CC0), REFRESHED DAILY · PORTRAITS · WIKIMEDIA COMMONS · SUMMARY · WIKIPEDIA (CC BY-SA 4.0)</div>`;
+    out.querySelectorAll('[data-bloc]').forEach(b => { b.onclick = () => setBloc(b.dataset.bloc); });
+    const title = f?.wiki || c.name;
+    const w = await wikiSummary(title);
+    if (!stillOn(c, 'profile')) return;
+    const box = $('wikiBrief');
+    if (!box) return;
+    box.innerHTML = w?.extract
+      ? `<p>${esc(w.extract.length > 700 ? w.extract.slice(0, 700).replace(/\s+\S*$/, '') + '…' : w.extract)}</p>
+         <a href="${esc(w.content_urls?.desktop?.page || wikiUrl(title))}" target="_blank" rel="noopener noreferrer">READ ON WIKIPEDIA ↗</a>`
+      : '<div class="loading" style="animation:none">SUMMARY UNAVAILABLE</div>';
+  }
+
+  // ------------------------------------------------------------ live satellites
+  let satsOn = store.get('opt.sats', true);
+  let satMeta = [], satPos = null, trackIdx = -1, issIdx = -1, issOrbit = null, orbitAt = 0;
+  const groupIndex = Object.fromEntries(Satellites.GROUPS.map((g, i) => [g.id, i]));
+  const R_EARTH_KM = 6371;
+  const satVisibleAlt = km => km > 80 && km < 3000; // GPS / geostationary sit far beyond the camera
+
+  function onSatellites({ meta, pos }) {
+    if (!satsOn) return;
+    satMeta = meta;
+    satPos = pos;
+    if (issIdx < 0) issIdx = meta.findIndex(m => /^ISS \(ZARYA\)/.test(m.name));
+    const sets = Satellites.GROUPS.map(g => Object.assign([], { color: g.color, size: g.size }));
+    let n = 0;
+    for (let i = 0; i < meta.length; i++) {
+      const alt = pos[i * 4 + 2];
+      if (!satVisibleAlt(alt)) continue;
+      sets[groupIndex[meta[i].group]].push({ lat: pos[i * 4], lng: pos[i * 4 + 1], alt: alt / R_EARTH_KM });
+      n++;
+    }
+    globe.particlesData(sets);
+    const iss = issIdx >= 0 ? satAt(issIdx) : null;
+    $('hudSat').textContent = `${n.toLocaleString('en-US')} OBJECTS${iss ? ` · ISS ${Math.round(iss.altKm)} KM · ${iss.speed.toFixed(2)} KM/S` : ''}`;
+    if (trackIdx >= 0) {
+      const s = satAt(trackIdx);
+      if (s) globe.pointOfView({ lat: s.lat, lng: s.lng, altitude: globe.pointOfView().altitude }, 450);
+    }
+    // ISS ground track, refreshed every minute
+    if (iss && performance.now() - orbitAt > 60000) {
+      orbitAt = performance.now();
+      Satellites.orbit(issIdx).then(pts => { issOrbit = splitAtAntimeridian(pts); updatePaths(); });
+    }
+  }
+  function satAt(i) {
+    if (!satPos || i < 0 || !satVisibleAlt(satPos[i * 4 + 2])) return null;
+    return { i, lat: satPos[i * 4], lng: satPos[i * 4 + 1], altKm: satPos[i * 4 + 2], speed: satPos[i * 4 + 3], ...satMeta[i] };
+  }
+  function splitAtAntimeridian(pts) {
+    const segs = [];
+    let cur = [];
+    for (const [lat, lng, km] of pts) {
+      const prev = cur[cur.length - 1];
+      if (prev && Math.abs(lng - prev[0]) > 180) { if (cur.length > 1) segs.push({ pts: cur }); cur = []; }
+      cur.push([lng, lat, km / R_EARTH_KM]);
+    }
+    if (cur.length > 1) segs.push({ pts: cur });
+    return segs;
+  }
+  function trackSat(i) {
+    const s = satAt(i);
+    if (!s) return;
+    if (state.selected) deselect();
+    trackIdx = i;
+    controls.autoRotate = false;
+    globe.pointOfView({ lat: s.lat, lng: s.lng, altitude: Math.min(globe.pointOfView().altitude, 1.6) }, 900);
+    $('trackIss').textContent = 'STOP TRACKING';
+    toast(`TRACKING ${s.name.toUpperCase()} · DRAG THE GLOBE TO RELEASE`);
+  }
+  function stopTracking() {
+    if (trackIdx < 0) return;
+    trackIdx = -1;
+    $('trackIss').textContent = 'TRACK ISS';
+  }
+  async function setSats(on) {
+    satsOn = on;
+    store.set('opt.sats', on);
+    renderToggles();
+    if (!on) {
+      Satellites.stop();
+      stopTracking();
+      globe.particlesData([]);
+      issOrbit = null;
+      updatePaths();
+      $('hudSat').textContent = 'OFFLINE';
+      return;
+    }
+    $('hudSat').textContent = 'ACQUIRING ORBITAL DATA…';
+    try { await Satellites.start(onSatellites); } catch (e) {
+      satsOn = false;
+      renderToggles();
+      $('hudSat').textContent = 'UNAVAILABLE';
+      toast('SATELLITE DATA UNAVAILABLE · ' + (e.message || e));
+    }
+  }
+  function setWarp(on) {
+    Satellites.setSpeed(on ? 60 : 1);
+    $('satWarp').classList.toggle('on', on);
+    $('satMode').textContent = on ? 'WARP ×60' : 'LIVE';
+    $('satMode').classList.toggle('warp', on);
+  }
+  $('trackIss').addEventListener('click', () => {
+    if (trackIdx >= 0) return stopTracking();
+    if (!satsOn) return toast('SWITCH SATS ON FIRST');
+    if (issIdx < 0) return toast('ISS NOT IN TRACKING DATA');
+    trackSat(issIdx);
+  });
+  $('satWarp').addEventListener('click', () => setWarp(Satellites.speed === 1));
 
   // ------------------------------------------------------------ hologram effects
   // flicker/glitch elements in (staggered); accepts selectors or elements
@@ -1381,6 +1678,15 @@
         .slice(0, n);
     },
     toggle: (k, on) => setOption(k, on),
+    alliances: ALLIANCES,
+    bloc: id => setBloc(id),
+    clearBloc: () => clearBloc(),
+    trackIss() {
+      if (!satsOn) { setSats(true); return toast('SATELLITES COMING ONLINE · TRY AGAIN IN A MOMENT'); }
+      if (issIdx >= 0) trackSat(issIdx); else toast('ISS NOT IN TRACKING DATA YET');
+    },
+    stopTracking: () => stopTracking(),
+    warp: on => setWarp(on ?? Satellites.speed === 1),
     watch(c) {
       state.watch.has(c.iso3) ? state.watch.delete(c.iso3) : state.watch.add(c.iso3);
       store.set('watch', [...state.watch]);
@@ -1448,6 +1754,7 @@
     // ENGAGE: fly in and glitch the HUD into existence
     globe.pointOfView({ lat: 22, lng: 10, altitude: 2.5 }, 2200);
     holoIn(['#topbar', '#index', '#toggles', '#hud', '#timebar', '#ticker'], 250);
+    if (satsOn) setTimeout(() => setSats(true), 1200); else $('hudSat').textContent = 'OFFLINE';
     if (!ONLINE) toast('OFFLINE MODE · SERVE THE public/ FOLDER OVER HTTP (SEE README)');
 
     setInterval(loadHotspots, 30 * 60 * 1000);

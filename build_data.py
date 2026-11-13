@@ -5,6 +5,7 @@ Build the site's static data in public/api/.
     python build_data.py --force      # refresh everything
     python build_data.py --no-news    # skip the (slow) per-country news snapshot
     python build_data.py --hotspots   # only refresh the news hotspots (fast, ~1 minute)
+    python build_data.py --facts      # only refresh leaders & country facts (fast, ~10 seconds)
 
 Writes:
     public/api/econ/<ISO3>.json      World Bank time series per country (GDP, trade, prices, ...)
@@ -14,6 +15,8 @@ Writes:
     public/api/history/<IND>.json    every country's value for every year (time slider), built from econ/
     public/api/hotspots.json         where the world's news is happening over the last 24 h, aggregated
                                      from GDELT's raw 15-minute event files (no API rate limit)
+    public/api/facts.json            heads of state / government (with portraits), currency, languages,
+                                     government type, calling code, internet domain (Wikidata, CC0)
 
 Runs daily on GitHub Actions (.github/workflows/update-data.yml). Standard library only.
 The World Bank API is slow (often 20s+ per request) and GDELT allows one request per 5 s,
@@ -58,7 +61,7 @@ INDICATORS = {
     "GC.DOD.TOTL.GD.ZS": "debt",
     "FI.RES.TOTL.CD": "reserves",
 }
-GLOBAL = ["NY.GDP.MKTP.CD", "NY.GDP.PCAP.CD", "NY.GDP.MKTP.KD.ZG", "NE.EXP.GNFS.CD", "NE.IMP.GNFS.CD"]
+GLOBAL = ["NY.GDP.MKTP.CD", "NY.GDP.PCAP.CD", "NY.GDP.MKTP.KD.ZG", "NE.EXP.GNFS.CD", "NE.IMP.GNFS.CD", "SP.POP.TOTL"]
 NO_WORLD_BANK_DATA = {"VAT"}  # Holy See is not covered by the World Bank
 HISTORY = {  # time-slider layers -> key in econ/<ISO3>.json
     "NY.GDP.MKTP.CD": "gdp",
@@ -71,6 +74,12 @@ HOTSPOT_MAX_AGE = 3 * 3600
 HOTSPOT_HOURS = 24
 HOTSPOT_TOP = 90
 HOTSPOT_PER_COUNTRY = 4  # GDELT is English-heavy; cap so one country can't fill the map
+FACTS_MAX_AGE = 20 * 3600
+# Where Wikidata's ISO code points at a wider entity than the country page people expect
+WIKI_TITLE_OVERRIDES = {"NLD": "Netherlands", "PSE": "State_of_Palestine"}
+# The US has no federal official language in Wikidata, which lists territory languages instead
+LANGUAGE_OVERRIDES = {"USA": ["English (de facto national)", "Spanish"]}
+WIKIDATA = "https://query.wikidata.org/sparql"
 
 
 def fetch(url, tries=4, retry_wait=5):
@@ -257,6 +266,167 @@ def hotspots(_):
     return "updated"
 
 
+_last_sparql = 0.0
+
+
+def sparql(query):
+    global _last_sparql
+    url = WIKIDATA + "?" + urllib.parse.urlencode({"query": query, "format": "json"})
+    req = urllib.request.Request(url, headers={
+        "User-Agent": "ATLAS-globe-data-build/1.0 (static site build)",
+        "Accept": "application/sparql-results+json",
+    })
+    for i in range(4):
+        # Wikidata sometimes limits clients to 1 request/minute: space requests out
+        wait = 61 - (time.time() - _last_sparql)
+        if wait > 0:
+            time.sleep(wait)
+        _last_sparql = time.time()
+        try:
+            with urllib.request.urlopen(req, timeout=120) as r:
+                return json.loads(r.read())["results"]["bindings"]
+        except urllib.error.HTTPError as e:
+            if i == 3:
+                raise
+            # 429 = rate limited (sometimes 1 request/minute during Wikidata incidents)
+            wait = int(e.headers.get("Retry-After") or 0) if e.code == 429 else 0
+            time.sleep(max(wait, 65 if e.code == 429 else 10 * (i + 1)))
+        except Exception:
+            if i == 3:
+                raise
+            time.sleep(10 * (i + 1))
+
+
+def _commons_thumb(url, width=240):
+    """Wikidata P18 gives a Special:FilePath URL; ask Commons for a small thumbnail."""
+    if not url:
+        return None
+    return url.replace("http://", "https://", 1).split("?")[0] + f"?width={width}"
+
+
+def facts(codes):
+    """Leaders (with portraits) and quick facts for every country, from Wikidata."""
+    path = os.path.join(OUT, "facts.json")
+    if fresh(path, FACTS_MAX_AGE):
+        return "cached"
+    values = " ".join(f'"{c}"' for c in codes)
+    # P298 = ISO alpha-3, P576 = dissolved (skip historical entities that kept the code)
+    base = f"VALUES ?iso {{ {values} }} ?c wdt:P298 ?iso . FILTER NOT EXISTS {{ ?c wdt:P576 [] }}"
+    leaders = sparql(f"""
+      SELECT ?iso ?article ?role ?p ?pLabel ?img ?pArticle ?officeLabel WHERE {{
+        {base}
+        OPTIONAL {{ ?article schema:about ?c ; schema:isPartOf <https://en.wikipedia.org/> }}
+        {{ ?c wdt:P35 ?p . BIND("hos" AS ?role) OPTIONAL {{ ?c wdt:P1906 ?office }} }}
+        UNION
+        {{ ?c wdt:P6 ?p . BIND("hog" AS ?role) OPTIONAL {{ ?c wdt:P1313 ?office }} }}
+        OPTIONAL {{ ?p wdt:P18 ?img }}
+        OPTIONAL {{ ?pArticle schema:about ?p ; schema:isPartOf <https://en.wikipedia.org/> }}
+        SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en,mul,es,fr,de". }}
+      }}""")
+    misc = sparql(f"""
+      SELECT ?iso ?article
+        (GROUP_CONCAT(DISTINCT ?curL; separator="|") AS ?currencies)
+        (GROUP_CONCAT(DISTINCT ?langL; separator="|") AS ?languages)
+        (GROUP_CONCAT(DISTINCT ?govL; separator="|") AS ?government)
+        (SAMPLE(?code) AS ?calling) (SAMPLE(?tldL) AS ?tld)
+      WHERE {{
+        {base}
+        OPTIONAL {{ ?article schema:about ?c ; schema:isPartOf <https://en.wikipedia.org/> }}
+        # statements with an end date (P582) are historical: skip them
+        OPTIONAL {{ ?c p:P38 ?cs . ?cs ps:P38 ?cur . FILTER NOT EXISTS {{ ?cs pq:P582 [] }}
+                    ?cur rdfs:label ?curL . FILTER(LANG(?curL) = "en") }}
+        OPTIONAL {{ ?c p:P37 ?ls . ?ls ps:P37 ?lang . FILTER NOT EXISTS {{ ?ls pq:P582 [] }}
+                    ?lang rdfs:label ?langL . FILTER(LANG(?langL) = "en") }}
+        OPTIONAL {{ ?c p:P122 ?gs . ?gs ps:P122 ?gov . FILTER NOT EXISTS {{ ?gs pq:P582 [] }}
+                    ?gov rdfs:label ?govL . FILTER(LANG(?govL) = "en") }}
+        OPTIONAL {{ ?c wdt:P474 ?code }}
+        OPTIONAL {{ ?c wdt:P78 ?tldI . ?tldI rdfs:label ?tldL . FILTER(LANG(?tldL) = "en") }}
+      }} GROUP BY ?iso ?article""")
+
+    out = {}
+    val = lambda b, k: b.get(k, {}).get("value")
+    for b in misc:
+        iso = val(b, "iso")
+        split = lambda k: sorted({x for x in (val(b, k) or "").split("|") if x})
+        out[iso] = {
+            "wiki": urllib.parse.unquote((val(b, "article") or "").rsplit("/", 1)[-1]) or None,
+            "currencies": split("currencies"),
+            "languages": split("languages"),
+            "government": split("government"),
+            "calling": val(b, "calling"),
+            "tld": val(b, "tld"),
+            "hos": [], "hog": [],
+        }
+    seen = set()
+    for b in leaders:
+        iso, role, qid = val(b, "iso"), val(b, "role"), (val(b, "p") or "").rsplit("/", 1)[-1]
+        if iso not in out or not qid:
+            continue
+        rec = out[iso]
+        office = val(b, "officeLabel")
+        key = (iso, role, qid)
+        if key in seen:
+            # same person listed once per office (e.g. Andorra's co-princes): collect offices
+            person = next(x for x in rec[role] if x["id"] == qid)
+            if office and office not in person["offices"]:
+                person["offices"].append(office)
+            continue
+        seen.add(key)
+        name = val(b, "pLabel")
+        if not name or re.fullmatch(r"Q\d+", name):
+            continue
+        rec[role].append({
+            "id": qid,
+            "name": name,
+            "offices": [office] if office else [],
+            "img": _commons_thumb(val(b, "img")),
+            "wiki": urllib.parse.unquote((val(b, "pArticle") or "").rsplit("/", 1)[-1]) or None,
+        })
+    # Fallback for countries whose current leader isn't marked "preferred" in Wikidata:
+    # take statements of P35 / P6 that have no end date.
+    missing = [iso for iso, rec in out.items() if not rec["hos"] and not rec["hog"]]
+    if missing:
+        mv = " ".join(f'"{c}"' for c in missing)
+        rows = sparql(f"""
+          SELECT ?iso ?role ?p ?pLabel ?img ?pArticle WHERE {{
+            VALUES ?iso {{ {mv} }} ?c wdt:P298 ?iso . FILTER NOT EXISTS {{ ?c wdt:P576 [] }}
+            {{ ?c p:P35 ?st . ?st ps:P35 ?p . BIND("hos" AS ?role) }} UNION {{ ?c p:P6 ?st . ?st ps:P6 ?p . BIND("hog" AS ?role) }}
+            FILTER NOT EXISTS {{ ?st pq:P582 [] }}
+            OPTIONAL {{ ?p wdt:P18 ?img }}
+            OPTIONAL {{ ?pArticle schema:about ?p ; schema:isPartOf <https://en.wikipedia.org/> }}
+            SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en,mul,es,fr,de". }}
+          }}""")
+        for b in rows:
+            iso, role, qid = val(b, "iso"), val(b, "role"), (val(b, "p") or "").rsplit("/", 1)[-1]
+            name = val(b, "pLabel")
+            if name and re.fullmatch(r"Q\d+", name):
+                continue
+            if iso in out and qid and name and not any(x["id"] == qid for x in out[iso][role]):
+                out[iso][role].append({"id": qid, "name": name, "offices": [], "img": _commons_thumb(val(b, "img")),
+                                       "wiki": urllib.parse.unquote((val(b, "pArticle") or "").rsplit("/", 1)[-1]) or None})
+
+    # most widely used first (the euro before the Aruban florin, English before Chamorro)
+    use = defaultdict(int)
+    for rec in out.values():
+        for x in rec["currencies"] + rec["languages"]:
+            use[x] += 1
+    for iso, rec in out.items():
+        for role in ("hos", "hog"):
+            rec[role] = rec[role][:3]
+        # sort by how widely used, THEN trim (Russia lists ~35 regional languages)
+        rec["currencies"] = sorted(rec["currencies"], key=lambda x: (-use[x], x))[:4]
+        rec["languages"] = sorted(rec["languages"], key=lambda x: (-use[x], x))[:6]
+        rec["government"] = rec["government"][:3]
+        if iso in WIKI_TITLE_OVERRIDES:
+            rec["wiki"] = WIKI_TITLE_OVERRIDES[iso]
+        if iso in LANGUAGE_OVERRIDES:
+            rec["languages"] = LANGUAGE_OVERRIDES[iso]
+    if len(out) < 150:
+        raise RuntimeError(f"Wikidata returned only {len(out)} countries")
+    save(path, {"source": "Wikidata (CC0)", "countries": out})
+    return "updated"
+
+
 def run(fn, arg):
     try:
         print(f"{fn(arg):8} {arg if isinstance(arg, str) else arg[0]}", flush=True)
@@ -277,6 +447,9 @@ if __name__ == "__main__":
 
     if "--hotspots" in sys.argv:
         sys.exit(0 if run(hotspots, "hotspots") else 1)
+    all_codes = [c["iso3"] for c in countries]
+    if "--facts" in sys.argv:
+        sys.exit(0 if run(lambda _: facts(all_codes), "facts") else 1)
 
     # World Bank: parallel (slow responses, no strict rate limit)
     with ThreadPoolExecutor(6) as ex:
@@ -284,6 +457,7 @@ if __name__ == "__main__":
                               [(global_layer, i) for i in GLOBAL] + [(econ, c) for c in codes]))
     results.append(run(build_history, "history"))
     results.append(run(hotspots, "hotspots"))
+    results.append(run(lambda _: facts(all_codes), "facts"))
 
     # GDELT: strictly one request at a time
     if "--no-news" not in sys.argv:

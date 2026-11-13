@@ -90,7 +90,8 @@
     </div>
     <div class="index-tabs">
       <button data-tab="all" class="on">ALL</button>
-      <button data-tab="watch">WATCHLIST ★</button>
+      <button data-tab="watch">WATCH ★</button>
+      <button data-tab="blocs">BLOCS</button>
     </div>
     <div class="index-sort">
       SORTED BY <b id="indexMetric">GDP</b>
@@ -117,13 +118,17 @@
     <div class="boot" id="boot"></div>
 
     <nav class="d-tabs" id="dTabs">
-      <button data-tab="economy" class="on">ECONOMY</button>
+      <button data-tab="profile" class="on">PROFILE</button>
+      <button data-tab="economy">ECONOMY</button>
       <button data-tab="trade">TRADE</button>
       <button data-tab="news">NEWS</button>
       <button data-tab="archive">ARCHIVE</button>
     </nav>
     <div class="d-body" id="dBody"></div>
   </section>
+
+  <!-- alliance summary card (show nato, show eu, ...) -->
+  <div id="blocCard" class="panel" hidden></div>
 
   <!-- big faint year watermark while time-travelling -->
   <div id="yearStamp" aria-hidden="true"></div>
@@ -133,6 +138,7 @@
     <button data-t="hands" title="Webcam hand-gesture control (video stays on this device)">HANDS</button>
     <button data-t="night" title="Live day / night shading">NIGHT</button>
     <button data-t="hot" title="News hotspots, last 24 hours">HOTSPOTS</button>
+    <button data-t="sats" title="Live satellite positions (CelesTrak)">SATS</button>
   </div>
 
   <!-- time slider -->
@@ -173,8 +179,13 @@
       <div class="hud-val" id="hudHot">LOADING…</div>
     </div>
     <div class="hud-block">
+      <div class="hud-label">ORBITAL TRACKING · <span id="satMode">LIVE</span></div>
+      <div class="hud-val" id="hudSat">STANDBY</div>
+      <div class="hud-actions"><button id="trackIss">TRACK ISS</button><button id="satWarp">WARP ×60</button></div>
+    </div>
+    <div class="hud-block">
       <div class="hud-label">UPLINKS</div>
-      <div class="hud-val small">ECON · WORLD BANK WDI<br>NEWS · GDELT PROJECT<br>NIGHT LIGHTS · NASA BLACK MARBLE</div>
+      <div class="hud-val small">ECON · WORLD BANK WDI<br>NEWS · GDELT PROJECT<br>NIGHT LIGHTS · NASA BLACK MARBLE<br>LEADERS · WIKIDATA · ORBITS · CELESTRAK</div>
     </div>
   </aside>
 
@@ -216,6 +227,8 @@
   <script src="https://cdn.jsdelivr.net/npm/globe.gl@2.45.3/dist/globe.gl.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/topojson-client@3.1.0/dist/topojson-client.min.js"></script>
   <script src="js/countries.js"></script>
+  <script src="js/alliances.js"></script>
+  <script src="js/satellites.js"></script>
   <script src="js/daynight.js"></script>
   <script src="js/intro.js"></script>
   <script src="js/hands.js"></script>
