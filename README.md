@@ -41,6 +41,7 @@ It is a fully **static site**, so it can be hosted for free on Cloudflare Pages.
   - **Hover** a dot for its name, altitude and speed. **Click** it to follow it with the camera.
   - **TRACK ISS** follows the space station and draws its orbit for the next 95 minutes.
   - **WARP ×60** speeds time up so you can see them move.
+- **Antarctica (a joke):** click it, find it at the bottom of the nations index, or type `who leads antarctica`. It isn't a country, so it stays out of every ranking and total, but its dossier has a leader: Emperor Penguin I. The News and Archive tabs are real.
 - **Toggles:** top right: **HANDS**, **NIGHT**, **HOTSPOTS** and **SATS**. Your choices are remembered in your browser.
 
 ---

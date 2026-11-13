@@ -10,6 +10,19 @@
   const COUNTRIES = window.UN_COUNTRIES;
   const byNum = new Map(COUNTRIES.map(c => [c.num, c]));
   const byIso3 = new Map(COUNTRIES.map(c => [c.iso3, c]));
+  // Antarctica: not a country, not in the UN and in no ranking, so it stays out of COUNTRIES
+  // (world totals, ranks, beacons). It can be clicked, searched and opened like a nation,
+  // with a dossier that is mostly a joke - see renderAntarctica().
+  const ANTARCTICA = {
+    iso3: 'ATA', iso2: 'AQ', num: '010', name: 'Antarctica', capital: 'South Pole',
+    lat: -90, lng: 0, region: 'Antarctica', income: 'Krill-based economy', joke: true,
+    sub: 'NOT A UN MEMBER · PENGUIN-GOVERNED TERRITORY',
+    tip: 'RULED BY <b>EMPEROR PENGUIN I</b>',
+    view: { lat: -76, lng: 30, altitude: 1.7 },
+    boot: ['> ESTABLISHING UPLINK :: ATA-010', '> TRIANGULATING 90.000S', '> DECRYPTING PENGUIN COMMUNICATIONS', '> COUNTING PENGUINS … GAVE UP'],
+  };
+  byNum.set(ANTARCTICA.num, ANTARCTICA);
+  byIso3.set(ANTARCTICA.iso3, ANTARCTICA);
   const $ = id => document.getElementById(id);
 
   // ------------------------------------------------------------ formatting
@@ -277,10 +290,29 @@
     });
     return moved && off === 0 ? out : ring; // a ring that circles the pole (Antarctica) stays as it is
   }
+  // Antarctica's mainland comes as a hairline ring along the pole with its coastline as a "hole":
+  // right on a sphere, but drawn flat it fills only up to a straight line across the map, leaving
+  // the pole as ocean, and it can't be clicked. Rebuild such a polygon as one flat ring: the
+  // coastline all the way round, then down to the pole, along it and back up.
+  function unwrapPolygon(poly) {
+    const polar = r => r.every(([, lat]) => Math.abs(lat) > 89.9);
+    if (!poly.some(polar)) return poly.map(unwrapRing);
+    return poly.filter(r => !polar(r)).map(ring => {
+      let off = 0;
+      const out = ring.map(([lng, lat], i) => {
+        if (i) { const d = lng - ring[i - 1][0]; if (d > 180) off -= 360; else if (d < -180) off += 360; }
+        return [lng + off, lat];
+      });
+      if (!off) return out; // an island inside the polar polygon, not the coastline
+      const pole = ring.reduce((s, [, lat]) => s + lat, 0) < 0 ? -90 : 90;
+      out.push([out[out.length - 1][0], pole], [out[0][0], pole], out[0]);
+      return out;
+    });
+  }
   function unwrapFeature(f) {
     const g = f.geometry;
-    if (g.type === 'Polygon') g.coordinates = g.coordinates.map(unwrapRing);
-    else if (g.type === 'MultiPolygon') g.coordinates = g.coordinates.map(p => p.map(unwrapRing));
+    if (g.type === 'Polygon') g.coordinates = unwrapPolygon(g.coordinates);
+    else if (g.type === 'MultiPolygon') g.coordinates = g.coordinates.map(unwrapPolygon);
   }
   const normLng = lng => ((lng + 540) % 360) - 180;
   function featureAt(lat, lng) {
@@ -544,7 +576,8 @@
     let rings = [];
     if (f) {
       const polys = f.geometry.type === 'Polygon' ? [f.geometry.coordinates] : f.geometry.coordinates;
-      rings = polys.map(p => p[0]).filter(r => r.length > 6).sort((a, b) => b.length - a.length).slice(0, 14);
+      rings = polys.map(p => p[0]).filter(r => r.length > 6).sort((a, b) => b.length - a.length).slice(0, 14)
+        .map(r => r.filter(([, lat]) => Math.abs(lat) < 89.9)); // no line down to the pole (Antarctica)
     }
     globe.pathsData(satsOn && issOrbit ? rings.concat(issOrbit) : rings);
   }
@@ -598,7 +631,8 @@
       tooltip.innerHTML = `<div class="tt-name">${esc(c.name)}${c.status === 'observer' ? '<span class="obs">OBS</span>' : ''}</div>
         <div class="tt-row">${L.short}: <b>${v ? L.fmt(v[1]) : 'N/A'}</b>${v ? ` · ${v[0]}` : state.year ? ` · ${state.year}` : ''}</div>
         ${r ? `<div class="tt-row">RANK <b>#${r}</b> / ${rk.total}</div>` : ''}
-        <div class="tt-row">CAPITAL <b>${esc(c.capital || '—')}</b></div>`;
+        <div class="tt-row">CAPITAL <b>${esc(c.capital || '—')}</b></div>
+        ${c.tip ? `<div class="tt-row">${c.tip}</div>` : ''}`;
       tooltip.style.display = 'block'; placeTooltip();
     }
     document.body.style.cursor = c ? 'pointer' : '';
@@ -612,6 +646,7 @@
 
   // camera target: centre of the nation's main landmass (not its capital, which is often on a coast)
   function viewFor(c) {
+    if (c.view) return c.view;
     const f = c.feature;
     if (!f) return { lat: c.lat, lng: c.lng, altitude: 0.35 };
     // extent of the largest polygon only (ignore far-flung overseas territories)
@@ -763,14 +798,14 @@
   function renderHeader(c) {
     $('dFlag').innerHTML = flagImg(c, 160);
     $('dName').textContent = c.name;
-    $('dSub').textContent = `TARGET ACQUIRED · ${c.iso3}${c.status === 'observer' ? ' · UN OBSERVER STATE' : ' · UN MEMBER STATE'}`;
+    $('dSub').textContent = `TARGET ACQUIRED · ${c.iso3} · ${c.sub || (c.status === 'observer' ? 'UN OBSERVER STATE' : 'UN MEMBER STATE')}`;
     $('dMeta').innerHTML = `CAPITAL <b>${esc(c.capital || '—')}</b> · ${c.lat?.toFixed(2)}°, ${c.lng?.toFixed(2)}°<br>${esc(c.region)} · <b>${esc(c.income)}</b>`;
     updateWatchBtn();
   }
 
   function boot(c) {
     const el = $('boot');
-    const lines = [
+    const lines = c.boot || [
       `> ESTABLISHING UPLINK :: ${c.iso3}-${c.num}`,
       `> TRIANGULATING ${c.lat?.toFixed(3)}N ${c.lng?.toFixed(3)}E`,
       `> DECRYPTING WORLD BANK WDI ARCHIVE`,
@@ -817,6 +852,7 @@
     const c = state.selected;
     if (!c) return;
     const tab = state.tab, out = $('dBody');
+    if (c.joke && (tab === 'profile' || tab === 'economy' || tab === 'trade')) return renderAntarctica(c, tab, out);
     out.innerHTML = (tab === 'economy' || tab === 'trade') && !state.econLoaded?.has(c.iso3) ? quickLook(c) : `<div class="loading">RETRIEVING ${tab.toUpperCase()} DATA</div>`;
     try {
       if (tab === 'profile') await renderProfile(c, out);
@@ -1059,12 +1095,12 @@
         <span class="bm">${a.members.length}</span><span class="bg">${usd(blocTotals(a).gdp)}</span></li>`).join('');
       return;
     }
-    let list = COUNTRIES.slice();
+    let list = state.indexTab === 'blocs' ? COUNTRIES.slice() : COUNTRIES.concat(ANTARCTICA); // Antarctica: always last
     if (state.indexTab === 'watch') list = list.filter(c => state.watch.has(c.iso3));
     if (state.indexTab === 'blocs') list = list.filter(c => state.bloc.set.has(c.iso3));
     const val = c => vals?.[c.iso3]?.[1];
-    list.sort((a, b) => (val(b) ?? -Infinity) - (val(a) ?? -Infinity) || a.name.localeCompare(b.name));
-    $('indexCount').textContent = list.length;
+    list.sort((a, b) => (a.joke ? 1 : 0) - (b.joke ? 1 : 0) || (val(b) ?? -Infinity) - (val(a) ?? -Infinity) || a.name.localeCompare(b.name));
+    $('indexCount').textContent = list.filter(c => !c.joke).length;
     const rk = ranksFor(ind);
     const head = state.indexTab === 'blocs' && state.bloc
       ? `<li class="bloc-head"><b>${esc(state.bloc.name)}</b> · ${state.bloc.members.length} MEMBERS<button class="bloc-x" title="Back to all blocs">✕</button></li>` : '';
@@ -1073,8 +1109,8 @@
       return `<li data-iso="${c.iso3}">
         <span class="rk">${rk?.get(c.iso3) ? '#' + rk.get(c.iso3) : '—'}</span>
         <span class="fl">${flagImg(c, 40)}</span>
-        <span class="nm">${esc(c.name)}${c.status === 'observer' ? '<span class="obs">OBS</span>' : ''}</span>
-        <span class="vl">${v != null ? L.fmt(v) : 'N/A'}</span>
+        <span class="nm">${esc(c.name)}${c.status === 'observer' ? '<span class="obs">OBS</span>' : c.joke ? '<span class="obs" title="Ruled by a penguin">🐧</span>' : ''}</span>
+        <span class="vl">${v != null ? L.fmt(v) : c.joke ? 'FISH' : 'N/A'}</span>
         <span class="bar"><i style="width:${t == null ? 0 : Math.abs(t) * 100}%;${t < 0 ? 'background:#ff6a3d' : ''}"></i></span>
       </li>`;
     }).join('') : `<li class="empty">${state.indexTab === 'watch' ? 'WATCHLIST EMPTY — OPEN A NATION AND PRESS ☆ TO TRACK IT.' : 'NO DATA'}</li>`);
@@ -1158,7 +1194,7 @@
       if ((c.capital || '').toLowerCase().startsWith(q)) return 3;
       return 9;
     };
-    hits = COUNTRIES.map(c => [score(c), c]).filter(x => x[0] < 9).sort((a, b) => a[0] - b[0] || a[1].name.localeCompare(b[1].name)).slice(0, 10).map(x => x[1]);
+    hits = COUNTRIES.concat(ANTARCTICA).map(c => [score(c), c]).filter(x => x[0] < 9).sort((a, b) => a[0] - b[0] || a[1].name.localeCompare(b[1].name)).slice(0, 10).map(x => x[1]);
     active = 0;
     results.innerHTML = hits.length ? hits.map((c, i) => `<li data-iso="${c.iso3}" class="${i === 0 ? 'active' : ''}"><span class="flag">${flagImg(c, 40)}</span>${esc(c.name)}<span class="sr-cap">${esc(c.capital || '')} · ${c.iso3}</span></li>`).join('')
       : '<li style="cursor:default;color:var(--muted)">NO MATCH</li>';
@@ -1509,7 +1545,9 @@
       <div class="wiki" id="wikiBrief"><div class="loading">ACCESSING ARCHIVE</div></div>
       <div class="note">LEADERS &amp; FACTS · WIKIDATA (CC0), REFRESHED DAILY · PORTRAITS · WIKIMEDIA COMMONS · SUMMARY · WIKIPEDIA (CC BY-SA 4.0)</div>`;
     out.querySelectorAll('[data-bloc]').forEach(b => { b.onclick = () => setBloc(b.dataset.bloc); });
-    const title = f?.wiki || c.name;
+    await fillBriefing(c, f?.wiki || c.name);
+  }
+  async function fillBriefing(c, title) {
     const w = await wikiSummary(title);
     if (!stillOn(c, 'profile')) return;
     const box = $('wikiBrief');
@@ -1518,6 +1556,54 @@
       ? `<p>${esc(w.extract.length > 700 ? w.extract.slice(0, 700).replace(/\s+\S*$/, '') + '…' : w.extract)}</p>
          <a href="${esc(w.content_urls?.desktop?.page || wikiUrl(title))}" target="_blank" rel="noopener noreferrer">READ ON WIKIPEDIA ↗</a>`
       : '<div class="loading" style="animation:none">SUMMARY UNAVAILABLE</div>';
+  }
+
+  // ------------------------------------------------------------ Antarctica (a joke, mostly)
+  // The leader is a penguin. The odd real fact is mixed in (+672, .aq, the 1959 treaty, the
+  // mining ban, visitor numbers); the NEWS and ARCHIVE tabs are the real thing.
+  const PENGUIN_PORTRAIT = 'https://commons.wikimedia.org/wiki/Special:FilePath/Emperor_penguin.jpg?width=240'; // public domain
+  async function renderAntarctica(c, tab, out) {
+    const t = (k, v, y = '') => `<div class="tile"><div class="k">${k}</div><div class="v sm">${v}</div>${y ? `<div class="y">${y}</div>` : ''}</div>`;
+    if (tab === 'profile') {
+      out.innerHTML = `
+        <div class="sec-title">LEADERSHIP <span class="yr">UNVERIFIED</span></div>
+        <div class="leaders">${leaderCard({ name: 'Emperor Penguin I', offices: ['Supreme Leader of the Ice'], img: PENGUIN_PORTRAIT, wiki: 'Emperor penguin' }, 'HEAD OF STATE & GOVERNMENT')}</div>
+        <div class="sec-title">QUICK FACTS</div>
+        <div class="tiles">
+          ${t('Capital', 'South Pole', 'allegedly')}
+          ${t('Population', 'Millions of penguins', '+ 1,000–5,000 humans, by season')}
+          ${t('Currency', 'Fish', 'backed by krill')}
+          ${t('Languages', 'Squawk, Honk')}
+          ${t('Government', 'Absolute penguin monarchy', 'on paper: the Antarctic Treaty, 1959')}
+          ${t('Calling code · Domain', '+672 · .aq')}
+        </div>
+        <div class="sec-title">BRIEFING <span class="yr">WIKIPEDIA</span></div>
+        <div class="wiki" id="wikiBrief"><div class="loading">ACCESSING ARCHIVE</div></div>
+        <div class="note">NO ELECTION HAS EVER BEEN HELD · THE EMPEROR DOES NOT TAKE QUESTIONS · PORTRAIT · WIKIMEDIA COMMONS (PUBLIC DOMAIN) · SUMMARY · WIKIPEDIA (CC BY-SA 4.0)</div>`;
+      await fillBriefing(c, 'Antarctica');
+    } else if (tab === 'economy') {
+      out.innerHTML = `
+        <div class="sec-title">GROSS DOMESTIC PRODUCT <span class="yr">ESTIMATE</span></div>
+        <div class="tiles">
+          ${t('GDP', '$0', 'paid in fish, never declared')}
+          ${t('Real growth', '0.0%', 'frozen solid')}
+          ${t('Main industry', 'Fishing')}
+          ${t('Unemployment', '0%', 'every penguin has a job')}
+          ${t('Tourism', '100,000+ visitors', 'per summer season')}
+          ${t('Mining', 'Banned', 'Madrid Protocol, 1991')}
+        </div>
+        <div class="note">THE WORLD BANK KEEPS NO FILE ON ANTARCTICA · THE EMPEROR DECLINED TO COMMENT</div>`;
+    } else {
+      out.innerHTML = `
+        <div class="sec-title">TRADE FLOWS <span class="yr">UNOFFICIAL</span></div>
+        <div class="tiles">
+          ${t('Exports', 'Ice, guano, nature documentaries')}
+          ${t('Imports', 'Scientists, fuel, more scientists')}
+          ${t('Trade balance', 'Positive', 'measured in fish')}
+          ${t('Main partner', 'The Southern Ocean')}
+        </div>
+        <div class="note">CUSTOMS OFFICE STAFFED BY ONE (1) SEAL</div>`;
+    }
   }
 
   // ------------------------------------------------------------ live satellites
@@ -1732,7 +1818,7 @@
 
   // ------------------------------------------------------------ command bar wiring
   CommandBar.init({
-    countries: COUNTRIES,
+    countries: COUNTRIES.concat(ANTARCTICA),
     byIso3: iso => byIso3.get(iso),
     flag: c => `<span class="fl">${flagImg(c, 40)}</span>`,
     select: (c, tab) => select(c, { tab }),
