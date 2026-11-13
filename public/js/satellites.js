@@ -1,7 +1,8 @@
 /* ==========================================================================
    Satellites — live satellite positions.
-   Orbit data (TLEs) comes from CelesTrak, cached in the browser for 2 hours
-   (CelesTrak updates every ~2 h and asks clients not to download more often).
+   Orbit data (TLEs) comes from CelesTrak via a snapshot the site ships in
+   api/tle/ (refreshed by the daily data job), with CelesTrak itself as the
+   fallback when that snapshot is stale.
    Positions are propagated with satellite.js (SGP4) in a Web Worker: this
    same file is loaded as the worker script, so the page never stutters.
    ========================================================================== */
@@ -58,29 +59,53 @@
     { id: 'starlink', label: 'STARLINK', color: 'rgba(200, 225, 255, 0.85)', size: 0.75 },
   ];
   const TTL = 2 * 3600 * 1000;
+  // The site ships its own snapshot (public/api/tle/, refreshed by the daily data job).
+  // Only when it is older than this does the browser ask CelesTrak for something fresher.
+  const SNAPSHOT_STALE = { starlink: 4 * 86400e3, default: 36 * 3600e3 };
   let worker = null, meta = [], timer = null, busy = false, onUpdate = null, nextId = 0;
-  let speed = 1, simBase = 0, realBase = 0, running = false;
+  let speed = 1, simBase = 0, realBase = 0, running = false, indexP = null;
   const waiting = new Map();
+  const isTle = text => /^1 \d/m.test(text);
 
-  async function tleText(group) {
+  const snapshotIndex = () => indexP ||= fetch('api/tle/index.json')
+    .then(r => (r.ok ? r.json() : null)).catch(() => null);
+
+  async function snapshot(group) {
+    const info = (await snapshotIndex())?.groups?.[group];
+    if (!info) return null;
+    try {
+      const r = await fetch(`api/tle/${group}.txt`);
+      const text = r.ok ? await r.text() : '';
+      return isTle(text) ? { text, age: Date.now() - info.fetched * 1000 } : null;
+    } catch { return null; }
+  }
+
+  // CelesTrak directly: kept in the browser for 2 hours, because CelesTrak blocks an IP
+  // that downloads the same group again within that time.
+  async function celestrak(group) {
     const url = `https://celestrak.org/NORAD/elements/gp.php?GROUP=${group}&FORMAT=tle`;
     let cache = null, hit = null;
     try { cache = await caches.open('atlas-tle'); hit = await cache.match(url); } catch { cache = null; }
-    const fetchedAt = hit ? +hit.headers.get('x-fetched') : 0;
-    if (hit && Date.now() - fetchedAt < TTL) return hit.text();
-    // 1) the site's own edge-cached copy (functions/api/tle.js on Cloudflare Pages),
-    // 2) CelesTrak directly (local preview, or if the function is unavailable)
-    for (const src of [`api/tle?group=${group}`, url]) {
-      try {
-        const r = await fetch(src);
-        const text = await r.text();
-        if (!r.ok || !/^1 /m.test(text)) continue;
+    if (hit && Date.now() - +hit.headers.get('x-fetched') < TTL) return hit.text();
+    try {
+      const r = await fetch(url, { signal: AbortSignal.timeout(30000) });
+      const text = await r.text();
+      if (r.ok && isTle(text)) {
         if (cache) await cache.put(url, new Response(text, { headers: { 'x-fetched': String(Date.now()) } }));
         return text;
-      } catch { /* try the next source */ }
+      }
+    } catch { /* slow, blocked or offline */ }
+    if (hit) return hit.text();
+    throw new Error('CelesTrak unavailable');
+  }
+
+  async function tleText(group) {
+    const snap = await snapshot(group);
+    if (snap && snap.age < (SNAPSHOT_STALE[group] || SNAPSHOT_STALE.default)) return snap.text;
+    try { return await celestrak(group); } catch (e) {
+      if (snap) return snap.text; // an old orbit still beats an empty sky
+      throw e;
     }
-    if (hit) return hit.text(); // stale beats nothing
-    throw new Error('no TLE data');
   }
 
   function parse(text, group, seen, tles) {

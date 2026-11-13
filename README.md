@@ -56,7 +56,7 @@ It is a fully **static site**, so it can be hosted for free on Cloudflare Pages.
 | News hotspots | `public/api/hotspots.json`, built from the last 24 hours of GDELT's raw 15-minute event files. These are plain downloads with no rate limit, and the step takes about a minute. |
 | Night lights | NASA "Black Marble" image (via the three-globe package on jsDelivr), blended in the browser. |
 | Leaders & facts | `public/api/facts.json`, built daily from Wikidata (CC0). Portraits come from Wikimedia Commons. The summary is fetched live from Wikipedia. |
-| Satellites | Orbit data (TLEs) from CelesTrak. `functions/api/tle.js` is a Cloudflare Pages Function that caches it at the edge for 2 hours, so all visitors share one download (CelesTrak blocks repeat downloads within 2 hours). Positions are calculated in the browser with satellite.js, in a Web Worker. |
+| Satellites | Orbit data (TLEs) from CelesTrak, saved by `build_data.py` to `public/api/tle/`, so it loads instantly from the site itself. Starlink comes from CelesTrak's SpaceX-supplied feed when the main one is busy. The small groups refresh daily and Starlink (1.7 MB) every third day, to keep the git history small. If the snapshot is ever more than a few days old, the browser asks CelesTrak directly. Positions are calculated in the browser with satellite.js, in a Web Worker. |
 | Headline archive and watchlist | Saved in each visitor's browser (localStorage). |
 | Borders and flags | `world-atlas` (Natural Earth) via jsDelivr, and flagcdn.com. |
 
@@ -72,8 +72,7 @@ public/                  ← this folder is the website (Cloudflare Pages output
   js/app.js              globe, animations, dossier, charts, news
   js/countries.js        193 UN members + 2 observers
   api/                   generated data (committed to git)
-build_data.py            downloads World Bank data, GDELT snapshots and Wikidata facts into public/api/
-functions/api/tle.js     Cloudflare Pages Function: edge-cached satellite orbit data
+build_data.py            downloads World Bank data, GDELT snapshots, Wikidata facts and satellite orbits into public/api/
 .github/workflows/update-data.yml   runs build_data.py daily and commits the result
 ```
 
@@ -92,6 +91,10 @@ Add `--no-news` to skip the news snapshot, or `--force` to re-download everythin
 To refresh only the news hotspots (about a minute), for example right before uploading:
 ```bash
 python build_data.py --hotspots
+```
+To refresh only the satellite orbit data (CelesTrak allows one download per group every 2 hours):
+```bash
+python build_data.py --tle --force
 ```
 
 ---

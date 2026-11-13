@@ -21,7 +21,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Download World Bank data + GDELT news snapshot
+      - name: Download economic data, news, facts and satellite orbits
         run: python build_data.py
       - name: Commit changes (Cloudflare Pages redeploys automatically)
         run: |

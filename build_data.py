@@ -5,7 +5,8 @@ Build the site's static data in public/api/.
     python build_data.py --force      # refresh everything
     python build_data.py --no-news    # skip the (slow) per-country news snapshot
     python build_data.py --hotspots   # only refresh the news hotspots (fast, ~1 minute)
-    python build_data.py --facts      # only refresh leaders & country facts (fast, ~10 seconds)
+    python build_data.py --facts      # only refresh leaders & country facts (a few minutes: Wikidata allows 1 query/min)
+    python build_data.py --tle        # only refresh satellite orbit data (about a minute)
 
 Writes:
     public/api/econ/<ISO3>.json      World Bank time series per country (GDP, trade, prices, ...)
@@ -17,6 +18,8 @@ Writes:
                                      from GDELT's raw 15-minute event files (no API rate limit)
     public/api/facts.json            heads of state / government (with portraits), currency, languages,
                                      government type, calling code, internet domain (Wikidata, CC0)
+    public/api/tle/<group>.txt       satellite orbit data (TLEs) from CelesTrak, plus tle/index.json
+                                     with when each group was downloaded
 
 Runs daily on GitHub Actions (.github/workflows/update-data.yml). Standard library only.
 The World Bank API is slow (often 20s+ per request) and GDELT allows one request per 5 s,
@@ -80,6 +83,15 @@ WIKI_TITLE_OVERRIDES = {"NLD": "Netherlands", "PSE": "State_of_Palestine"}
 # The US has no federal official language in Wikidata, which lists territory languages instead
 LANGUAGE_OVERRIDES = {"USA": ["English (de facto national)", "Spanish"]}
 WIKIDATA = "https://query.wikidata.org/sparql"
+# satellite group -> (refresh after, minimum plausible count). Starlink is ~1.7 MB, so it is
+# refreshed every third day to keep the git history small; 3-day-old orbits are still within
+# a few tens of km, well under a pixel on the globe.
+TLE_GROUPS = {
+    "stations": (20 * 3600, 3),
+    "weather": (20 * 3600, 20),
+    "visual": (20 * 3600, 50),
+    "starlink": (60 * 3600, 1000),
+}
 
 
 def fetch(url, tries=4, retry_wait=5):
@@ -427,6 +439,68 @@ def facts(codes):
     return "updated"
 
 
+def _tle_index():
+    try:
+        with open(os.path.join(OUT, "tle", "index.json"), encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {"source": "CelesTrak (celestrak.org)", "groups": {}}
+
+
+def _tle_store(group, text):
+    """Save one group's TLE text and record when it was fetched."""
+    count = len(re.findall(r"^1 \d", text, re.M))
+    if count < TLE_GROUPS[group][1]:
+        raise RuntimeError(f"only {count} satellites in the download")
+    folder = os.path.join(OUT, "tle")
+    os.makedirs(folder, exist_ok=True)
+    lines = [l.rstrip() for l in text.splitlines() if l.strip()]
+    tmp = os.path.join(folder, group + ".txt.tmp")
+    with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+        f.write("\n".join(lines) + "\n")
+    os.replace(tmp, os.path.join(folder, group + ".txt"))
+    idx = _tle_index()
+    idx["groups"][group] = {"fetched": int(time.time()), "count": count}
+    save(os.path.join(folder, "index.json"), idx)
+    return count
+
+
+def tle(group):
+    """Satellite orbit data (TLEs) from CelesTrak, served to the browser from the site itself.
+    CelesTrak refuses connections from Cloudflare's servers and blocks an IP that downloads the
+    same group again within ~2 hours, so a same-origin snapshot is the dependable source."""
+    max_age, _ = TLE_GROUPS[group]
+    info = _tle_index()["groups"].get(group)
+    if not FORCE and info and time.time() - info["fetched"] < max_age \
+            and os.path.exists(os.path.join(OUT, "tle", group + ".txt")):
+        return "fresh"
+    urls = [f"https://celestrak.org/NORAD/elements/gp.php?GROUP={group}&FORMAT=tle"]
+    if group == "starlink":  # SpaceX's own ephemerides: a separate download with its own limit
+        urls.append("https://celestrak.org/NORAD/elements/supplemental/sup-gp.php?FILE=starlink&FORMAT=tle")
+    errors = []
+    for url in urls:
+        req = urllib.request.Request(url, headers={"User-Agent": "ATLAS-globe-data-build/1.0 (static site build)"})
+        for attempt in range(4):
+            try:
+                with urllib.request.urlopen(req, timeout=180) as r:
+                    text = r.read().decode("utf-8", "replace")
+                return f"{_tle_store(group, text)} sats"
+            except urllib.error.HTTPError as e:
+                # 403 = this IP downloaded the group too recently: retrying only makes it worse
+                if e.code < 500 or attempt == 3:
+                    errors.append(f"HTTP {e.code}: {e.read()[:160].decode('utf-8', 'replace').strip()}")
+                    break
+            except RuntimeError as e:  # a download with too few satellites: not worth retrying
+                errors.append(str(e))
+                break
+            except (urllib.error.URLError, TimeoutError) as e:
+                if attempt == 3:
+                    errors.append(str(e))
+                    break
+            time.sleep(20 * (attempt + 1))  # CelesTrak returns the odd 500 when busy
+    raise RuntimeError("CelesTrak: " + " | ".join(errors))
+
+
 def run(fn, arg):
     try:
         print(f"{fn(arg):8} {arg if isinstance(arg, str) else arg[0]}", flush=True)
@@ -450,6 +524,8 @@ if __name__ == "__main__":
     all_codes = [c["iso3"] for c in countries]
     if "--facts" in sys.argv:
         sys.exit(0 if run(lambda _: facts(all_codes), "facts") else 1)
+    if "--tle" in sys.argv:
+        sys.exit(0 if all([run(tle, g) for g in TLE_GROUPS]) else 1)
 
     # World Bank: parallel (slow responses, no strict rate limit)
     with ThreadPoolExecutor(6) as ex:
@@ -458,6 +534,7 @@ if __name__ == "__main__":
     results.append(run(build_history, "history"))
     results.append(run(hotspots, "hotspots"))
     results.append(run(lambda _: facts(all_codes), "facts"))
+    results += [run(tle, g) for g in TLE_GROUPS]
 
     # GDELT: strictly one request at a time
     if "--no-news" not in sys.argv:
